@@ -42,6 +42,9 @@ def make_env(env_name, task, config, render_mode=None):
     elif env_name == "babaisai":
         from verl.envs.environments.babaisai.babaisai_env import make_babaisai_env
         base_env = make_babaisai_env(env_name, task, config, render_mode=render_mode)
+    elif env_name == "arc_game":
+        from verl.envs.environments.arc_game.arc_game_env import make_arc_game_env
+        base_env = make_arc_game_env(env_name, task, config, render_mode=render_mode)
     else:
         raise ValueError(f"Unknown environment: {env_name}")
     

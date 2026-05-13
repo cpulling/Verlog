@@ -376,6 +376,22 @@ envs:
 
     num_dists: 0
 
+  arc_game_kwargs:
+
+    # TCP port the Unity GymServerManager listens on
+    unity_port: 9876
+
+    # gym-side max steps per episode (mirrors Unity-side max_days truncation)
+    max_episode_steps: 100
+
+    # Unity-side day budget
+    max_days: 30
+
+    # Trainer doesn't fork Unity; expect the headless build to already be running
+    auto_start_unity: False
+    unity_exe_path: null
+    connection_timeout: 30.0
+
   babaisai_kwargs: 
 
     add_ruleset: True

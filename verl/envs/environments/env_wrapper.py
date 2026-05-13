@@ -38,6 +38,8 @@ class EnvWrapper(gym.Wrapper):
             obs = obs
         elif self.env_name == "crafter":
             obs = obs
+        elif self.env_name == "arc_game":
+            obs = obs
         else:
             raise ValueError(f"Unknown environment: {self.env_name}")
 
@@ -76,6 +78,10 @@ class EnvWrapper(gym.Wrapper):
             from verl.envs.environments.crafter import get_instruction_prompt
 
             return get_instruction_prompt(self.task_name, info)
+        elif self.env_name == "arc_game":
+            from verl.envs.environments.arc_game import get_instruction_prompt
+
+            return get_instruction_prompt(self.env, mission=instructions or self.task_name)
         else:
             raise ValueError(f"Unknown environment: {self.env_namee}")
 
