@@ -503,6 +503,17 @@ class AgentLoopWorker:
             logprobs=config.calculate_log_probs,
         )
 
+        # Optional grammar-constrained decoding. When GUIDED_REGEX is set,
+        # vLLM's logit processor masks tokens that would violate the regex at
+        # every step, so invalid action tags cannot be emitted. Passed via env
+        # (not Hydra) so we don't have to escape regex metachars through the
+        # Hydra CLI. Empty string disables — matches the launcher's opt-out.
+        import os as _os
+        guided_regex = _os.environ.get("GUIDED_REGEX", "").strip()
+        if guided_regex:
+            from vllm.sampling_params import GuidedDecodingParams
+            sampling_params["guided_decoding"] = GuidedDecodingParams(regex=guided_regex)
+
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p

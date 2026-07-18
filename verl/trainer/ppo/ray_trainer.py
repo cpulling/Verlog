@@ -837,6 +837,47 @@ class RayPPOTrainer:
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 
+    def _maybe_update_best_ckpt(self, metrics):
+        """Hardlink current step's checkpoint into `best/` if the tracked metric
+        improved. No-op unless `trainer.best_ckpt_metric` is configured.
+
+        Uses `cp -al` (hardlink recursion) so best/ shares inodes with the
+        original global_step_N/ dir — costs no additional disk. If max_actor_
+        ckpt_to_keep later prunes the source dir, best/ is self-sufficient
+        because the underlying blocks stay alive as long as any hardlink exists.
+        """
+        metric_name = self.config.trainer.get("best_ckpt_metric", None)
+        if not metric_name:
+            return
+        val = metrics.get(metric_name)
+        if val is None:
+            return
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            return
+        if self.best_metric_value is not None and val <= self.best_metric_value:
+            return
+        # New best.
+        import shutil
+        import subprocess
+
+        root = self.config.trainer.default_local_dir
+        src = os.path.join(root, f"global_step_{self.global_steps}")
+        dst = os.path.join(root, "best")
+        if not os.path.isdir(src):
+            print(f"[best_ckpt] source missing, skip: {src}")
+            return
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        subprocess.run(["cp", "-al", src, dst], check=True)
+        with open(os.path.join(dst, "best_iteration.txt"), "w") as f:
+            f.write(f"global_step={self.global_steps}\n{metric_name}={val:.6f}\n")
+        prev = self.best_metric_value
+        self.best_metric_value = val
+        self.best_step = self.global_steps
+        print(f"[best_ckpt] new best at step {self.global_steps}: {metric_name}={val:.6f} (was {prev})")
+
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
@@ -1053,6 +1094,12 @@ class RayPPOTrainer:
         )
 
         self.global_steps = 0
+
+        # Best-checkpoint tracking (enable via trainer.best_ckpt_metric=<key>).
+        # Compatible with rolling max_actor/critic_ckpt_to_keep — best is hardlinked
+        # into best/ so pruning global_step_N/ doesn't lose it (shared inodes).
+        self.best_metric_value = None
+        self.best_step = None
 
         # load checkpoint before doing anything
         self._load_checkpoint()
@@ -1339,6 +1386,7 @@ class RayPPOTrainer:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
+                        self._maybe_update_best_ckpt(metrics)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

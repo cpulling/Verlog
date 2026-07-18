@@ -49,4 +49,14 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    # CORA: forward GUIDED_REGEX to workers. Ray does not auto-inherit driver
+    # env vars, and the ARC agent_loop reads GUIDED_REGEX from os.environ
+    # (env-var-based so regex metachars don't need Hydra-escaping).
+    if os.environ.get("GUIDED_REGEX"):
+        runtime_env["env_vars"]["GUIDED_REGEX"] = os.environ["GUIDED_REGEX"]
+    # CORA: forward ARC_STABLE_TASK_TOKENS to workers. obs_encoder reads this
+    # at import time to decide whether to render tasks with stable (BUDGET_DAILY,
+    # FOOD_C01, ...) tokens instead of the drifting integer taskId.
+    if os.environ.get("ARC_STABLE_TASK_TOKENS"):
+        runtime_env["env_vars"]["ARC_STABLE_TASK_TOKENS"] = os.environ["ARC_STABLE_TASK_TOKENS"]
     return runtime_env

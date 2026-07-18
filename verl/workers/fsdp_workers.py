@@ -1283,7 +1283,13 @@ class CriticWorker(Worker, DistProfilerExtension):
             critic_module.enable_input_require_grads()
             # Convert config to regular Python types before creating PEFT model
             lora_config = {
-                "task_type": TaskType.CAUSAL_LM,
+                # verl's critic is a Qwen*ForTokenClassification with a custom value head.
+                # Using task_type=CAUSAL_LM breaks (no prepare_inputs_for_generation on the
+                # classifier head), TOKEN_CLS breaks (peft's modules_to_save auto-wrap trips
+                # its own check_module on the value head). No task_type → generic PeftModel,
+                # which is exactly what we want: LoRA adapters wrapped around the linears,
+                # no task-specific hooks.
+                "task_type": None,
                 "r": self.config.model.lora_rank,
                 "lora_alpha": self.config.model.lora_alpha,
                 "target_modules": convert_to_regular_types(self.config.model.target_modules),

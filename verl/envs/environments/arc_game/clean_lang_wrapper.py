@@ -1,101 +1,66 @@
-"""
-ARCGame clean language wrapper.
+"""ARCGame clean language wrapper — `minimal_cmd_v3` observation.
 
-Converts ARCGameGymEnv observations into a text-only prompt and exposes a
-dynamic numeric-index action space ("0", "1", ..., str(N-1)) where N is the
-number of valid actions for the current state.
+Renders each turn as the same compact state block the benchmark's
+`bench_format_ablation/compact_minimal_cmd_v3` cell uses:
+  * state-only obs (no enumerated menu) via `summarize_commands`
+  * compact text serialization via `render_state_compact`
 
-The underlying env is verb/state-based and produces large nested dicts; this
-wrapper flattens the most important fields (day, satisfaction, budget) and
-renders the action list in the same numbered format that ARC's own llm_query
-uses, so prompts are consistent with the agent_router stack.
+The system prompt (cmd grammar + minimal PIMMUR variant) is provided
+separately by `arc_game/__init__.py:get_instruction_prompt`, and the
+LLM's tag output is parsed by `parse_commands` in the llm_agents wrapper.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+
 import gymnasium as gym
 
 
-def _summarize_state(game_state: dict) -> str:
-    session = game_state.get("sessionInfo", {}) or {}
-    sat_budget = game_state.get("satisfactionAndBudget", {}) or {}
-    day = session.get("currentDay", "?")
-    segment = session.get("currentTimeSegment", "?")
-    satisfaction = sat_budget.get("satisfaction", "?")
-    budget = sat_budget.get("budget", "?")
-    if isinstance(budget, (int, float)):
-        budget_str = f"${budget:,}"
-    else:
-        budget_str = str(budget)
-    return (
-        f"Day {day}, Segment {segment}. "
-        f"Satisfaction: {satisfaction}. Budget: {budget_str}."
-    )
-
-
-def _format_actions(valid_actions: list) -> str:
-    if not valid_actions:
-        return "(no valid actions)"
-    lines = []
-    for i, a in enumerate(valid_actions):
-        action_type = a.get("actionType", "?")
-        description = a.get("description", "?")
-        cost = a.get("cost", 0)
-        lines.append(f"{i}. [{action_type}] {description} (cost: ${cost})")
-    return "\n".join(lines)
+def _ensure_smoke_on_path() -> None:
+    arc_path = os.environ.get("ARC_GAME_PATH")
+    if arc_path and arc_path not in sys.path:
+        sys.path.insert(0, arc_path)
 
 
 class ARCGameCleanLangWrapper(gym.Wrapper):
-    """Text-rendering wrapper over ARCGameGymEnv.
-
-    The underlying env already returns a game_state dict from `reset()` and
-    `step()`; this wrapper attaches the rendered `obs["text"]` and tracks
-    `language_action_space` based on the current `valid_actions` so that
-    BALROG-style helpers (get_text_action / default_action) keep working.
-    """
+    """Text-rendering wrapper over ARCGameGymEnv (cmd/compact/minimal)."""
 
     def __init__(self, env, **kwargs):
         super().__init__(env)
         self._last_state: dict = {}
+        # Kept for backwards-compat with the BALROG helper API. Under the cmd
+        # format actions are emitted as free-form tags, not integer indices,
+        # so this list has no useful contents each turn — leave it empty.
         self.language_action_space: list[str] = []
         self.progression: float = 0.0
 
     @property
     def max_steps(self):
-        # Underlying ARC env carries this as `max_episode_steps`.
         return getattr(self.env, "max_episode_steps", 100)
 
     @property
     def default_action(self) -> str:
-        return "0" if self.language_action_space else ""
+        # No-op turn under the cmd format is the empty string (the base env
+        # treats an empty action CSV as a genuine no-op — see step()).
+        return ""
 
     def get_text_action(self, action):
-        # If called with an int-like, return the indexed description; otherwise echo.
-        try:
-            idx = int(action)
-            if 0 <= idx < len(getattr(self.env, "valid_actions", []) or []):
-                return self.env.valid_actions[idx].get("description", str(idx))
-        except (TypeError, ValueError):
-            pass
         return str(action)
 
     @property
     def valid_actions(self):
-        # Expose the underlying ARCGameGymEnv's dynamic action list so the
-        # LLM-agents wrapper can validate parsed indices without relying on
-        # gym.Wrapper attribute proxying.
         return getattr(self.env, "valid_actions", []) or []
 
-    def _refresh_action_space(self) -> None:
-        n = len(self.valid_actions)
-        self.language_action_space = [str(i) for i in range(n)]
-
-    def _build_text_obs(self, game_state: dict) -> dict:
-        valid_actions = getattr(self.env, "valid_actions", []) or []
-        long_term_context = (
-            f"Current situation:\n{_summarize_state(game_state)}\n\n"
-            f"Available actions:\n{_format_actions(valid_actions)}"
+    def _build_text_obs(self) -> dict:
+        _ensure_smoke_on_path()
+        from llm_smoke_test import (  # type: ignore
+            render_state_compact,
+            summarize_commands,
         )
+        state_obs = summarize_commands(self.env)
+        long_term_context = render_state_compact(state_obs)
         return {"long_term_context": long_term_context, "short_term_context": ""}
 
     # ── gym API ────────────────────────────────────────────────
@@ -104,8 +69,7 @@ class ARCGameCleanLangWrapper(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self._last_state = obs if isinstance(obs, dict) else {}
         self.progression = 0.0
-        self._refresh_action_space()
-        out = {"text": self._build_text_obs(self._last_state), "image": None,
+        out = {"text": self._build_text_obs(), "image": None,
                "game_state": self._last_state}
         return out, info
 
@@ -114,8 +78,7 @@ class ARCGameCleanLangWrapper(gym.Wrapper):
         self._last_state = obs if isinstance(obs, dict) else self._last_state
         if reward > 0:
             self.progression = max(self.progression, min(1.0, self.progression + 0.1))
-        self._refresh_action_space()
-        out = {"text": self._build_text_obs(self._last_state), "image": None,
+        out = {"text": self._build_text_obs(), "image": None,
                "game_state": self._last_state}
         return out, reward, terminated, truncated, info
 
