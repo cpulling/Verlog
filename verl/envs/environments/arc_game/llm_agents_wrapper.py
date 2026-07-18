@@ -525,17 +525,28 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
         m.setdefault("behavior/empty_plan", 0.0)
         m.setdefault("behavior/cmd_parse_errors", 0.0)
         m.setdefault("behavior/cmd_tags_parsed", 0.0)
+        m.setdefault("behavior/tool_calls_received", 0.0)
+        m.setdefault("behavior/tool_calls_valid_json", 0.0)
+        m.setdefault("behavior/tool_calls_bad_json", 0.0)
+        m.setdefault("behavior/tool_calls_unknown_name", 0.0)
         m.setdefault("arc/snap/env_step_sec", 0.0)
         return m
 
     # -- LLM output parsing --------------------------------------------
 
-    def extract_action(self, action: str):
-        """Parse the LLM's cmd-tag response and prep the base env for step().
+    def extract_action(self, action):
+        """Parse the LLM's response and prep the base env for step().
 
-        Uses the benchmark's own `parse_commands` (llm_smoke_test) so the RL
-        agent trains against the same action surface as the `minimal_cmd_v3`
-        benchmark cell. `parse_commands` returns:
+        Two input shapes:
+          (a) str  — legacy text mode. Passes straight through to parse_commands.
+          (b) dict with "tool_calls" — Hermes tool-call mode from tool_agent_loop.
+              We synthesize equivalent <build>...</build>-style XML tags from the
+              parsed (name, arguments) list and reuse the exact same parse_commands
+              path. This keeps every existing metric, validation, and error
+              accounting semantically identical, so a tool-calls A/B against the
+              text baseline is comparable on the same behavior/* axes.
+
+        `parse_commands` returns:
             {actions: [idx...], choices: [{taskId,choiceId}...],
              parsed: [...], errors: [...]}
         Task choices are submitted directly via the base env's
@@ -545,9 +556,15 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
         _ensure_smoke_on_path()
         from llm_smoke_test import parse_commands  # type: ignore
 
-        full_action = str(action)
+        tool_call_meta = {}
+        if isinstance(action, dict) and "tool_calls" in action:
+            synth, tool_call_meta = self._synthesize_tags_from_tool_calls(action)
+            full_action = synth
+        else:
+            full_action = str(action)
         inner = _innermost(self.env)
 
+        pc = None
         with suppress(Exception):
             pc = parse_commands(full_action, inner)
         pc = pc if isinstance(pc, dict) else {"actions": [], "choices": [],
@@ -614,9 +631,70 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
             "behavior/has_tag": 1.0 if has_tag else 0.0,
             "behavior/empty_plan": 1.0 if (has_tag and not errors and not (actions or choices)) else 0.0,
         }
+        # Tool-call-mode diagnostics — only non-zero when input came from the
+        # Hermes tool-call fork above. Lets us track "how often did the model
+        # produce a valid tool_call" separately from "how often did the resulting
+        # action set validate" — the difference is JSON-well-formed but
+        # semantically wrong (unknown site, mismatched enum, etc.).
+        metrics["behavior/tool_calls_received"] = float(tool_call_meta.get("received", 0))
+        metrics["behavior/tool_calls_valid_json"] = float(tool_call_meta.get("valid_json", 0))
+        metrics["behavior/tool_calls_bad_json"] = float(tool_call_meta.get("bad_json", 0))
+        metrics["behavior/tool_calls_unknown_name"] = float(tool_call_meta.get("unknown_name", 0))
         self._last_raw_response = full_action
         self._last_executed = executed
         self._last_is_valid = bool(is_valid)
         return full_action, executed, is_valid, metrics
+
+    # -- Hermes tool-call → XML-tag synthesis --------------------------
+    #
+    # Maps 7 ARC tools onto the 7 XML tags parse_commands already handles.
+    # Argument names come from tool_config/arc_tools.yaml. This is deliberately
+    # thin — we do NOT re-implement parse_commands; we translate the structured
+    # form back into the string form the existing parser semantically validates.
+    # If the model emits JSON with the wrong key names or bad enum values, the
+    # synthesized string will fail parse_commands' checks the same way a
+    # malformed <build>...</build> tag would, and both paths end up incrementing
+    # the same behavior/cmd_parse_errors metric.
+    _TOOL_TO_TAG = {
+        "build":       ("build",       ("type", "site_id")),
+        "hire":        ("hire",        ("kind", "count")),
+        "train":       ("train",       ("count",)),
+        "staff":       ("staff",       ("site", "count")),
+        "deconstruct": ("deconstruct", ("site",)),
+        "task":        ("task",        ("task_id", "choice_id")),
+        "transfer":    ("transfer",    ("resource", "source", "destination", "quantity")),
+    }
+
+    def _synthesize_tags_from_tool_calls(self, action_dict: dict) -> tuple[str, dict]:
+        """Turn [(name, args_json), ...] into a REASONING/ACTION string that
+        parse_commands can consume.
+
+        Returns (synthesized_text, meta) where meta = {received, valid_json,
+        bad_json, unknown_name} counters.
+        """
+        import json as _json
+        calls = action_dict.get("tool_calls") or []
+        content = action_dict.get("content") or ""
+        meta = {"received": len(calls), "valid_json": 0, "bad_json": 0, "unknown_name": 0}
+        tags: list[str] = []
+        for name, args_json in calls:
+            spec = self._TOOL_TO_TAG.get(name)
+            if spec is None:
+                meta["unknown_name"] += 1
+                continue
+            tag_name, arg_keys = spec
+            try:
+                args = _json.loads(args_json) if isinstance(args_json, str) else dict(args_json or {})
+                if not isinstance(args, dict):
+                    raise ValueError("arguments must be an object")
+                meta["valid_json"] += 1
+            except Exception:
+                meta["bad_json"] += 1
+                continue
+            parts = [str(args.get(k, "")).strip() for k in arg_keys]
+            tags.append(f"<{tag_name}>{','.join(parts)}</{tag_name}>")
+        reasoning = str(content).strip()[:4000] or "Emitted via native tool calls."
+        synthesized = f"REASONING: {reasoning}\nACTION: {' '.join(tags)}"
+        return synthesized, meta
 
 

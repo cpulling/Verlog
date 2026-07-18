@@ -153,11 +153,39 @@ class ToolAgentLoop(AgentLoopBase):
             if output.log_probs:
                 response_logprobs = output.log_probs[: self.response_length]
             
-            actions = await self.loop.run_in_executor(
-                None,
-                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
-            )
-            
+            # Two action-emission modes:
+            #  - text mode (default): decoded assistant text goes to env.step(str)
+            #  - tool-call mode: when tool_schemas is non-empty (multi_turn.tool_config_path
+            #    set), route through HermesToolParser. If it finds >=1 <tool_call> blocks,
+            #    hand env.step a dict {"raw_text", "content", "tool_calls":[(name, args_json)]}
+            #    so the env can dispatch structured calls. If parsing finds zero calls
+            #    (early training / model still emitting regex tags), fall back to raw text —
+            #    env.step handles both shapes.
+            if self.tool_schemas:
+                content, function_calls = await self.tool_parser.extract_tool_calls(response_ids)
+                raw_text = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                )
+                if function_calls:
+                    actions = {
+                        "raw_text": raw_text,
+                        "content": content,
+                        "tool_calls": [(fc.name, fc.arguments) for fc in function_calls],
+                    }
+                    metrics.setdefault("behavior/tool_call_turns", 0)
+                    metrics["behavior/tool_call_turns"] += 1
+                    metrics.setdefault("behavior/tool_calls_per_turn", []).append(len(function_calls))
+                else:
+                    actions = raw_text
+                    metrics.setdefault("behavior/tool_call_empty_turns", 0)
+                    metrics["behavior/tool_call_empty_turns"] += 1
+            else:
+                actions = await self.loop.run_in_executor(
+                    None,
+                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                )
+
             last_prompt_ids = copy.deepcopy(prompt_ids)
             is_full = await counter.is_full.remote()
             if is_full and not is_val:
