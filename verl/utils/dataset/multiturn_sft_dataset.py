@@ -97,8 +97,18 @@ class MultiTurnSFTDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
-        # Extract messages list from dataframe
-        self.messages = self.dataframe[self.messages_key].apply(series_to_item).tolist()
+        # Extract messages list from dataframe.
+        # Recursively unwrap numpy -> list: parquet round-trips list columns as
+        # numpy arrays at every nesting level, so a message's tool_calls list
+        # arrives as an ndarray. `series_to_item` only strips a single outer
+        # wrapper; when the chat template later does `if message.tool_calls:`,
+        # jinja hits numpy's "truth value ambiguous" and fails the whole row.
+        self.messages = (
+            self.dataframe[self.messages_key]
+            .apply(series_to_item)
+            .apply(convert_nested_value_to_list_recursive)
+            .tolist()
+        )
 
         # Extract tools list from dataframe
         if self.tools_key in self.dataframe.columns:

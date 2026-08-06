@@ -1,4 +1,5 @@
 import copy
+import os
 import re
 
 from verl.envs.captioners.base import BaseCaptioner
@@ -29,8 +30,14 @@ class COTCaptioner(BaseCaptioner):
         messages = self.prompt_builder.get_prompt()
 
         # Add CoT-specific instructions to the prompt
-        
-        if self.env_name == "babaisai":
+        # When ARC_ACTION_MODE=tool_calls, the tool-mode system prompt already
+        # tells the model to emit <tool_call>...</tool_call> blocks. Appending
+        # a THINK:/ACTION: footer here contradicts that and wins (it's the last
+        # thing the model reads). Skip it in tool-call mode so the model isn't
+        # instructed to emit two mutually-exclusive formats simultaneously.
+        if os.environ.get("ARC_ACTION_MODE", "").strip().lower() == "tool_calls":
+            cot_instructions = ""
+        elif self.env_name == "babaisai":
             cot_instructions = """
     What will you do next? Please respond in the following format:
     THINK: step-by-step reasoning
@@ -43,7 +50,8 @@ class COTCaptioner(BaseCaptioner):
     ACTION: One valid action from the allowed set.
             """.strip()
 
-        messages[-1].content += "\n\n" + cot_instructions
+        if cot_instructions:
+            messages[-1].content += "\n\n" + cot_instructions
 
         # convert messages to dict format
         prompts = []

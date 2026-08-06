@@ -409,6 +409,7 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
                     "turn": self._traj_turn_counter,
                     "pre_step_context": pre_ctx,
                     "model_raw_response": self._last_raw_response,
+                    "model_raw_output": getattr(self, "_last_raw_output", self._last_raw_response),
                     "executed": self._last_executed,
                     "is_valid_format": self._last_is_valid,
                     "exec_attempted": exec_count,
@@ -560,8 +561,14 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
         if isinstance(action, dict) and "tool_calls" in action:
             synth, tool_call_meta = self._synthesize_tags_from_tool_calls(action)
             full_action = synth
+            # Preserve what the model literally emitted (with <tool_call> tags and
+            # <think> prelude) — logged as model_raw_output so trajectory analysis
+            # can inspect real model syntax, not just the synthesized XML we hand
+            # to parse_commands.
+            self._last_raw_output = str(action.get("raw_text") or "")
         else:
             full_action = str(action)
+            self._last_raw_output = full_action
         inner = _innermost(self.env)
 
         pc = None

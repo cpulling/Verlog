@@ -26,6 +26,16 @@ mkdir -p "$LOG_DIR"
 export MODEL=Qwen/Qwen3-0.6B
 export EXPERIMENT_NAME=qwen3_0p6b_tools_${TAG}
 
+# Per-job Unity port so a killed job's orphan Unity (which keeps port 9876
+# bound) doesn't intercept the next job's connect. The wrapper's
+# already-alive probe would otherwise attach to the dead Unity and Unity
+# would reject the reconnect as a second client. Range 30000-39999.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  export BASE_PORT=$(( 30000 + SLURM_JOB_ID % 10000 ))
+else
+  export BASE_PORT=${BASE_PORT:-30000}
+fi
+
 # Tool-mode arm: switch the ARC system prompt to the tool-call variant, disable
 # GCD (irrelevant/conflicting with Hermes JSON), and point verl at the tool
 # config so Qwen3's chat template renders the schemas.

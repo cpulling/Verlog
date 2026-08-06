@@ -91,6 +91,18 @@ ENTROPY_COEFF=${ENTROPY_COEFF:-0.005}
 # doesn't crush low-prob exploration tokens (Yu et al. 2025).
 CLIP_RATIO_LOW=${CLIP_RATIO_LOW:-0.2}
 CLIP_RATIO_HIGH=${CLIP_RATIO_HIGH:-0.28}
+
+# v3 additions (see analysis/exploration_vs_exploitation.md for rationale):
+# - ACTOR_LR: 3e-6 (was hardcoded 1e-6) — compensates for grad_norm 3.6x smaller
+#   on SFT-warm actor vs raw-PPO. Restores per-step actor movement.
+# - USE_KL_LOSS + KL_LOSS_COEF + REF_MODEL: anchor KL to BASE Qwen3-4B, not to SFT.
+#   SFT reference would re-freeze the actor at the failure basin (Echo Collapse
+#   per RAGEN / StarPO). Base ref only fights out-of-distribution drift.
+ACTOR_LR=${ACTOR_LR:-3e-6}
+CRITIC_LR=${CRITIC_LR:-1e-5}
+USE_KL_LOSS=${USE_KL_LOSS:-True}
+KL_LOSS_COEF=${KL_LOSS_COEF:-0.05}
+REF_MODEL=${REF_MODEL:-Qwen/Qwen3-4B}
 # Tag count capped at {1,3} to prevent multi-tag bursts (18394 collapsed at {1,15}).
 # Site names enum-locked to the 28-name vocabulary observed in 18394 trajectory
 # (Motel/Community[01-03]/Shelter[_0-4]/Shelters/Kitchen[_0-4]/Kitchens/Casework/
@@ -200,11 +212,13 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.model.path=${MODEL} \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
-    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.use_kl_loss=${USE_KL_LOSS} \
+    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF} \
+    +actor_rollout_ref.ref.model.path=${REF_MODEL} \
     actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
     actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF} \
     actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
@@ -224,7 +238,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=10240 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=10240 \
-    critic.optim.lr=1e-5 \
+    critic.optim.lr=${CRITIC_LR} \
     critic.model.use_remove_padding=True \
     critic.model.path=${MODEL} \
     critic.model.enable_gradient_checkpointing=True \
@@ -253,6 +267,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.default_local_dir="${CKPT_DIR}" \
     trainer.max_actor_ckpt_to_keep=${MAX_CKPT_TO_KEEP} \
+    +trainer.rollout_data_dir="${ROLLOUT_DUMP_DIR}" \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=arc_game \
     envs.task='ARC disaster response' \
