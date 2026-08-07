@@ -1,159 +1,163 @@
-# ARC disaster-response game — tool schemas for Qwen3 Hermes tool-calling.
-#
-# These schemas replace the <build>...</build> XML grammar the model currently
-# emits. When multi_turn.tool_config_path points at this file, Qwen3's chat
-# template renders the schemas into a Hermes <tools>...</tools> system block
-# and the model emits <tool_call>{"name":"...", "arguments":{...}}</tool_call>.
-#
-# execute() is a no-op — ArcEnvTool is a schema-only stub. Real dispatch happens
-# in verl/envs/environments/arc_game/llm_agents_wrapper._step_from_tool_calls,
-# which maps (name, arguments_dict) onto the same ARC gym action space the
-# regex parser hits today.
-#
-# Design notes:
-# - One function per action type (7 total). Argument objects, not positional.
-# - Enums lock only state-INDEPENDENT vocabularies: building types, worker
-#   kinds, resource types. Site names / task ids are strings because they
-#   change per turn.
-# - "site" fields carry a description hint listing the 28-name vocabulary
-#   observed in prior runs (Motel/Community/Shelter/Kitchen/Casework family).
-# - "task_id" accepts either the stable token (BUDGET_DAILY, FOOD_C01, ...)
-#   emitted when ARC_STABLE_TASK_TOKENS=1, or the raw integer for backwards
-#   compat — llm_smoke_test.parse_commands already handles both.
-
 tools:
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "build"
-        description: "Start construction of a new building at an available site."
-        parameters:
-          type: "object"
-          properties:
-            type:
-              type: "string"
-              enum: ["kitchen", "shelter", "casework"]
-              description: "The building type to construct."
-            site_id:
-              type: "integer"
-              description: "The integer site_id offered this turn under the construction action group."
-          required: ["type", "site_id"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "hire"
-        description: "Hire N workers of a given kind. Trained workers cost more but count as 2 workforce units when assigned."
-        parameters:
-          type: "object"
-          properties:
-            kind:
-              type: "string"
-              enum: ["untrained", "trained"]
-              description: "Whether to hire untrained (cheap, 1 workforce unit) or trained (expensive, 2 units) workers."
-            count:
-              type: "integer"
-              description: "Number of workers to hire, 1-127."
-          required: ["kind", "count"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "train"
-        description: "Train N of your existing untrained workers into trained workers."
-        parameters:
-          type: "object"
-          properties:
-            count:
-              type: "integer"
-              description: "Number of untrained workers to promote to trained, 1-127."
-          required: ["count"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "staff"
-        description: "Assign N workforce units from the free pool to an already-built facility that still needs workers. A worker hired this same turn IS available to staff. Untrained=1 unit, trained=2 units."
-        parameters:
-          type: "object"
-          properties:
-            site:
-              type: "string"
-              description: "Name of the facility to staff. Substring match, case-insensitive. Vocabulary: Motel, Community01/02/03, Shelter/Shelter_0..4/Shelters, Kitchen/Kitchen_0..4/Kitchens, Casework, CaseworkSite_0..4."
-            count:
-              type: "integer"
-              description: "Workforce units to assign, 1-127. Actual amount is capped by free workforce and remaining building need."
-          required: ["site", "count"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "deconstruct"
-        description: "Tear down an existing building. Frees the site and refunds nothing."
-        parameters:
-          type: "object"
-          properties:
-            site:
-              type: "string"
-              description: "Name of the facility to deconstruct. Substring match, case-insensitive. Same vocabulary as staff.site."
-          required: ["site"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "task"
-        description: "Respond to an active task by selecting one of its offered choices. Tasks and their choices are enumerated at the top of each observation."
-        parameters:
-          type: "object"
-          properties:
-            task_id:
-              type: "string"
-              description: "Either the stable task token (BUDGET_DAILY, FOOD_C01, RELOC_C02, ...) shown in the observation, or the raw integer taskId. Must match a task actually offered this turn — hallucinated ids are dropped."
-            choice_id:
-              type: "integer"
-              description: "The integer choice_id from that task's choice list, 0-based."
-          required: ["task_id", "choice_id"]
-
-  - class_name: "verl.tools.arc_env_tool.ArcEnvTool"
-    config:
-      type: native
-    tool_schema:
-      type: "function"
-      function:
-        name: "transfer"
-        description: "Move a quantity of a resource from one facility to another using a free vehicle. Only available when manual_transfers is enabled."
-        parameters:
-          type: "object"
-          properties:
-            resource:
-              type: "string"
-              enum: ["food", "people"]
-              description: "What to move. 'food' = FoodPacks; 'people' = displaced Population."
-            source:
-              type: "string"
-              description: "Facility to move FROM. Substring match, case-insensitive."
-            destination:
-              type: "string"
-              description: "Facility to move TO. Substring match, case-insensitive."
-            quantity:
-              type: "integer"
-              description: "Desired amount. Snaps to the closest offered quantity for this route."
-          required: ["resource", "source", "destination", "quantity"]
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: build
+      description: Start construction of a new building at an available site.
+      parameters:
+        type: object
+        properties:
+          type:
+            type: string
+            enum:
+            - kitchen
+            - shelter
+            - casework
+            description: The building type to construct.
+          site_id:
+            type: integer
+            description: The integer site_id offered this turn under the construction action group.
+        required:
+        - type
+        - site_id
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: hire
+      description: Hire N workers of a given kind. Trained workers cost more but count as 2 workforce
+        units when assigned.
+      parameters:
+        type: object
+        properties:
+          kind:
+            type: string
+            enum:
+            - untrained
+            - trained
+            description: Whether to hire untrained (cheap, 1 workforce unit) or trained (expensive, 2
+              units) workers.
+          count:
+            type: integer
+            description: Number of workers to hire, 1-127.
+        required:
+        - kind
+        - count
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: train
+      description: Train N of your existing untrained workers into trained workers.
+      parameters:
+        type: object
+        properties:
+          count:
+            type: integer
+            description: Number of untrained workers to promote to trained, 1-127.
+        required:
+        - count
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: staff
+      description: Assign N workforce units from the free pool to an already-built facility that still
+        needs workers. A worker hired this same turn IS available to staff. Untrained=1 unit, trained=2
+        units.
+      parameters:
+        type: object
+        properties:
+          site:
+            type: string
+            description: 'Name of the facility to staff. Substring match, case-insensitive. Vocabulary:
+              Motel, Community01/02/03, Shelter/Shelter_0..4/Shelters, Kitchen/Kitchen_0..4/Kitchens,
+              Casework, CaseworkSite_0..4.'
+          count:
+            type: integer
+            description: Workforce units to assign, 1-127. Actual amount is capped by free workforce and
+              remaining building need.
+        required:
+        - site
+        - count
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: deconstruct
+      description: Tear down an existing building. Frees the site and refunds nothing.
+      parameters:
+        type: object
+        properties:
+          site:
+            type: string
+            description: Name of the facility to deconstruct. Substring match, case-insensitive. Same
+              vocabulary as staff.site.
+        required:
+        - site
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: task
+      description: Respond to an active task by selecting one of its offered choices. Tasks and their
+        choices are enumerated at the top of each observation.
+      parameters:
+        type: object
+        properties:
+          task_id:
+            type: string
+            description: "Either the stable task token (BUDGET_DAILY, FOOD_C01, RELOC_C02, ...) shown\
+              \ in the observation, or the raw integer taskId. Must match a task actually offered this\
+              \ turn \u2014 hallucinated ids are dropped."
+          choice_id:
+            type: integer
+            description: The integer choice_id from that task's choice list, 0-based.
+        required:
+        - task_id
+        - choice_id
+- class_name: verl.tools.arc_env_tool.ArcEnvTool
+  config:
+    type: native
+  tool_schema:
+    type: function
+    function:
+      name: transfer
+      description: Move a quantity of a resource from one facility to another using a free vehicle. Only
+        available when manual_transfers is enabled.
+      parameters:
+        type: object
+        properties:
+          resource:
+            type: string
+            enum:
+            - food
+            - people
+            description: Which resource to move.
+          source:
+            type: string
+            description: Source facility name (substring match).
+          dest:
+            type: string
+            description: Destination facility name (substring match).
+          qty:
+            type: integer
+            description: Quantity to move; snapped to the nearest offered amount.
+        required:
+        - resource
+        - source
+        - dest
+        - qty

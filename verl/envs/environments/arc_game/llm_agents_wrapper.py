@@ -556,11 +556,18 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
         """
         _ensure_smoke_on_path()
         from llm_smoke_test import parse_commands  # type: ignore
+        from cora_tools import translate_tool_calls  # type: ignore  # shared canonical translator (Phase B)
 
         tool_call_meta = {}
         if isinstance(action, dict) and "tool_calls" in action:
-            synth, tool_call_meta = self._synthesize_tags_from_tool_calls(action)
-            full_action = synth
+            # Shared translator (cora_tools): typed tool_calls -> command tags, so the RL policy and
+            # the live officer use the IDENTICAL tool schema + translation. Meta is remapped to the
+            # existing behavior/tool_calls_* metric keys; unknown_name/bad_args stay reward-visible.
+            _tags, _m = translate_tool_calls(action.get("tool_calls") or [])
+            tool_call_meta = {"received": _m["received"], "valid_json": _m["valid"],
+                              "bad_json": _m["bad_args"], "unknown_name": _m["unknown_name"]}
+            content = (action.get("content") or "").strip()
+            full_action = f"REASONING: {content}\nACTION: {_tags}" if content else f"ACTION: {_tags}"
             # Preserve what the model literally emitted (with <tool_call> tags and
             # <think> prelude) — logged as model_raw_output so trajectory analysis
             # can inspect real model syntax, not just the synthesized XML we hand
@@ -652,56 +659,8 @@ class ARCGameLLMAgentsWrapper(gym.Wrapper):
         self._last_is_valid = bool(is_valid)
         return full_action, executed, is_valid, metrics
 
-    # -- Hermes tool-call → XML-tag synthesis --------------------------
-    #
-    # Maps 7 ARC tools onto the 7 XML tags parse_commands already handles.
-    # Argument names come from tool_config/arc_tools.yaml. This is deliberately
-    # thin — we do NOT re-implement parse_commands; we translate the structured
-    # form back into the string form the existing parser semantically validates.
-    # If the model emits JSON with the wrong key names or bad enum values, the
-    # synthesized string will fail parse_commands' checks the same way a
-    # malformed <build>...</build> tag would, and both paths end up incrementing
-    # the same behavior/cmd_parse_errors metric.
-    _TOOL_TO_TAG = {
-        "build":       ("build",       ("type", "site_id")),
-        "hire":        ("hire",        ("kind", "count")),
-        "train":       ("train",       ("count",)),
-        "staff":       ("staff",       ("site", "count")),
-        "deconstruct": ("deconstruct", ("site",)),
-        "task":        ("task",        ("task_id", "choice_id")),
-        "transfer":    ("transfer",    ("resource", "source", "destination", "quantity")),
-    }
+    # (Hermes tool_call -> command-tag translation now lives in the shared cora_tools
+    # .translate_tool_calls, imported in extract_action — Phase B unification.)
 
-    def _synthesize_tags_from_tool_calls(self, action_dict: dict) -> tuple[str, dict]:
-        """Turn [(name, args_json), ...] into a REASONING/ACTION string that
-        parse_commands can consume.
-
-        Returns (synthesized_text, meta) where meta = {received, valid_json,
-        bad_json, unknown_name} counters.
-        """
-        import json as _json
-        calls = action_dict.get("tool_calls") or []
-        content = action_dict.get("content") or ""
-        meta = {"received": len(calls), "valid_json": 0, "bad_json": 0, "unknown_name": 0}
-        tags: list[str] = []
-        for name, args_json in calls:
-            spec = self._TOOL_TO_TAG.get(name)
-            if spec is None:
-                meta["unknown_name"] += 1
-                continue
-            tag_name, arg_keys = spec
-            try:
-                args = _json.loads(args_json) if isinstance(args_json, str) else dict(args_json or {})
-                if not isinstance(args, dict):
-                    raise ValueError("arguments must be an object")
-                meta["valid_json"] += 1
-            except Exception:
-                meta["bad_json"] += 1
-                continue
-            parts = [str(args.get(k, "")).strip() for k in arg_keys]
-            tags.append(f"<{tag_name}>{','.join(parts)}</{tag_name}>")
-        reasoning = str(content).strip()[:4000] or "Emitted via native tool calls."
-        synthesized = f"REASONING: {reasoning}\nACTION: {' '.join(tags)}"
-        return synthesized, meta
 
 
