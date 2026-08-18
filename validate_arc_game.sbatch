@@ -41,6 +41,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export ARC_GAME_PATH=/zfsauton/scratch/cpulling/CORA/ARC_Game/ARC_Game_New
 export ARC_GAME_BUILD=$ARC_GAME_PATH/Build/Headless/Linux/ARC_Headless.x86_64
 export ARC_STABLE_TASK_TOKENS=${ARC_STABLE_TASK_TOKENS:-1}
+# WITHOUT THIS the env falls back to "text" mode -- the XML <build>...</build> grammar --
+# even though tool_config_path is passed, because get_instruction_prompt() selects the
+# HOW-TO-ACT paragraph off ARC_ACTION_MODE, not off the tool config. The training launchers
+# all set it; omitting it here would have silently benchmarked the wrong action interface.
+export ARC_ACTION_MODE=${ARC_ACTION_MODE:-tool_calls}
 
 cd "$REPO_DIR"
 
