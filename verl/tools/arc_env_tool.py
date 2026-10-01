@@ -12,8 +12,8 @@ class ArcEnvTool(BaseTool):
     per-tool Python classes. This class exists so the YAML config can carry
     OpenAI-format function schemas that Qwen3's chat template renders into a
     Hermes <tool_call> system block. execute() is intentionally a no-op —
-    tool calls are parsed by HermesToolParser and dispatched by the env
-    wrapper (llm_agents_wrapper._step_from_tool_calls).
+    tool calls are parsed by HermesToolParser and executed by the CORA env
+    (arc_game.cora_adapter -> rl.CoraEnv -> cora.executor).
     """
 
     pass

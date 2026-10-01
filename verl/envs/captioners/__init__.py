@@ -15,6 +15,9 @@ def make_captioner(config):
     if config.envs.captioner.type == "naive":
         from .naive import NaiveCaptioner
         return NaiveCaptioner(prompt_builder, env_name)
+    elif config.envs.captioner.type == "cora":
+        from .cora import CoraCaptioner
+        return CoraCaptioner(prompt_builder, env_name)
     elif config.envs.captioner.type == "cot":
         from .cot import COTCaptioner
         return COTCaptioner(prompt_builder, env_name)

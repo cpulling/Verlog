@@ -116,21 +116,12 @@ REF_MODEL=${REF_MODEL:-Qwen/Qwen3-4B}
 GUIDED_REGEX=""
 export GUIDED_REGEX
 
-# TOOL-CALL ARM: route obs_encoder + get_instruction_prompt to the tool-call
-# system prompt (no XML grammar section). tool_agent_loop reads tool_schemas
-# from multi_turn.tool_config_path and routes assistant output through
-# HermesToolParser; llm_agents_wrapper.extract_action synthesizes the
-# equivalent XML tags from the parsed calls and reuses parse_commands so the
-# behavior/* metrics are directly comparable to the text-mode baseline.
-export ARC_ACTION_MODE=${ARC_ACTION_MODE:-tool_calls}
+# Tool-call arm: tool_agent_loop reads the tool schemas from multi_turn.tool_config_path
+# (generated from cora.tools) and parses the model's calls with HermesToolParser; the CORA env
+# (arc_game.cora_adapter -> rl.CoraEnv) executes them through cora.executor.
 TOOL_CONFIG_PATH=${TOOL_CONFIG_PATH:-verl/envs/environments/arc_game/tool_config/arc_tools.yaml}
 MULTI_TURN_FORMAT=${MULTI_TURN_FORMAT:-hermes}
 
-# Stable, title-based task IDs (BUDGET_DAILY, FOOD_C01, ...) instead of Unity's
-# drifting integer taskIds. Fixes the top-1 documented policy blocker (52.7% of
-# <task> commands referenced hallucinated IDs in prior runs). Default ON; set
-# ARC_STABLE_TASK_TOKENS=0 to disable (baseline / benchmark parity).
-export ARC_STABLE_TASK_TOKENS=${ARC_STABLE_TASK_TOKENS:-1}
 # Per-job Unity port (see launch_qwen3_slim_tools.sh for rationale — orphaned
 # Unity from a killed job keeps its port bound; the wrapper's already-alive
 # probe attaches to the dead server and Unity rejects the reconnect as a
@@ -271,11 +262,10 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     envs.num_envs=${NUM_ENVS} \
     envs.env_name=arc_game \
     envs.task='ARC disaster response' \
+    envs.captioner.type=cora \
     envs.arc_game_kwargs.unity_port=${BASE_PORT} \
-    envs.arc_game_kwargs.max_episode_steps=${MAX_EPISODE_STEPS} \
-    envs.arc_game_kwargs.auto_start_unity=True \
-    envs.arc_game_kwargs.unity_exe_path=${ARC_GAME_BUILD} \
-    +envs.arc_game_kwargs.restart_unity_each_episode=False \
+    envs.arc_game_kwargs.max_steps=${MAX_EPISODE_STEPS} \
+    envs.arc_game_kwargs.unity_exe=${ARC_GAME_BUILD} \
     +envs.arc_game_kwargs.format_penalty=$FORMAT_PENALTY \
     +envs.arc_game_kwargs.semantic_penalty=$SEMANTIC_PENALTY \
     +envs.arc_game_kwargs.format_bonus=$FORMAT_BONUS \

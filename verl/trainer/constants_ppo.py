@@ -54,14 +54,4 @@ def get_ppo_ray_runtime_env():
     # (env-var-based so regex metachars don't need Hydra-escaping).
     if os.environ.get("GUIDED_REGEX"):
         runtime_env["env_vars"]["GUIDED_REGEX"] = os.environ["GUIDED_REGEX"]
-    # CORA: forward ARC_STABLE_TASK_TOKENS to workers. obs_encoder reads this
-    # at import time to decide whether to render tasks with stable (BUDGET_DAILY,
-    # FOOD_C01, ...) tokens instead of the drifting integer taskId.
-    if os.environ.get("ARC_STABLE_TASK_TOKENS"):
-        runtime_env["env_vars"]["ARC_STABLE_TASK_TOKENS"] = os.environ["ARC_STABLE_TASK_TOKENS"]
-    # CORA: forward ARC_ACTION_MODE to workers. arc_game.__init__.get_instruction_prompt
-    # reads this per-call to choose between the XML-tag system prompt (default) and the
-    # tool-call system prompt (when set to "tool_calls").
-    if os.environ.get("ARC_ACTION_MODE"):
-        runtime_env["env_vars"]["ARC_ACTION_MODE"] = os.environ["ARC_ACTION_MODE"]
     return runtime_env

@@ -378,19 +378,18 @@ envs:
 
   arc_game_kwargs:
 
-    # TCP port the Unity GymServerManager listens on
+    # Base TCP port; env worker i launches its own headless Unity on unity_port + i
     unity_port: 9876
 
-    # gym-side max steps per episode (mirrors Unity-side max_days truncation)
-    max_episode_steps: 100
+    # Decision cap per episode (a full game is 36 decisions and ends itself)
+    max_steps: 40
 
-    # Unity-side day budget
-    max_days: 30
+    # Headless build; null = the ARC_Game repo's default build (cora.env.unity_process.default_exe)
+    unity_exe: null
 
-    # Trainer doesn't fork Unity; expect the headless build to already be running
-    auto_start_unity: False
-    unity_exe_path: null
-    connection_timeout: 30.0
+    # Any other rl.CoraEnvConfig field (prompt, ablation, obs_encoding, history, seed, map_config,
+    # param_config, manual_transfers) and the shaping knobs format_penalty / semantic_penalty /
+    # format_bonus can be added with +envs.arc_game_kwargs.<name>=...
 
   babaisai_kwargs: 
 
