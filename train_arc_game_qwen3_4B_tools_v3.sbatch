@@ -158,6 +158,10 @@ MAX_CKPT_TO_KEEP=${MAX_CKPT_TO_KEEP:-2}
 # Trajectory logging
 export ARC_TRAJECTORY_LOG="$REPO_DIR/logs/qwen3_4b/${EXPERIMENT_NAME}.trajectory.jsonl"
 : > "$ARC_TRAJECTORY_LOG"
+# Per-step rollout dumps (trainer.rollout_data_dir); referenced below but never defined, which
+# killed the job under `set -u` before training started.
+ROLLOUT_DUMP_DIR=${ROLLOUT_DUMP_DIR:-$REPO_DIR/logs/qwen3_4b/${EXPERIMENT_NAME}_rollouts}
+mkdir -p "$ROLLOUT_DUMP_DIR"
 
 # Reset per-run Unity-port counter
 rm -f "/tmp/arc_game_port_counter_${BASE_PORT}_${NUM_ENVS}.txt"
