@@ -29,8 +29,8 @@
 
 set -euo pipefail
 
-REPO_DIR=/zfsauton/scratch/cpulling/CORA/Verlog
-ARC_GAME_PATH=/zfsauton/scratch/cpulling/CORA/ARC_Game/ARC_Game_New
+REPO_DIR=${REPO_DIR:-/zfsauton/scratch/cpulling/CORA/Verlog}
+ARC_GAME_PATH=${ARC_GAME_PATH:-/zfsauton/scratch/cpulling/CORA/ARC_Game/ARC_Game_New}
 ARC_GAME_BUILD=${ARC_GAME_PATH}/Build/Headless/Linux/ARC_Headless.x86_64
 
 # Path-style activation of the verlog conda env
