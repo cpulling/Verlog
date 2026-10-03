@@ -79,7 +79,8 @@ PPO_LOGGER=${PPO_LOGGER:-'["console","wandb"]'}
 # a clean head-to-head. Bump NUM_ENVS to 8/16 later once the 4B run is stable
 # to fully use the 4-GPU rollout throughput.
 NUM_ENVS=${NUM_ENVS:-4}
-MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-32}
+# A full game is 29 decisions (ARC_Game cora.env.DECISIONS); the env ends the episode there.
+MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-29}
 BATCH_SIZE=${BATCH_SIZE:-$((NUM_ENVS * MAX_EPISODE_STEPS))}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 # The trainer appends each env's s_{T+1} for bootstrapping, so it splits BATCH_SIZE + NUM_ENVS rows
