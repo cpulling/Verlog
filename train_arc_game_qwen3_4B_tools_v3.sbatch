@@ -42,6 +42,9 @@ export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 
 cd "$REPO_DIR"
+# The conda env has verl installed editable from another checkout; this one must win, in Ray
+# workers too (they inherit the environment).
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p logs/arc_game logs/qwen3_4b
 
 ulimit -n 65535 || true
@@ -75,10 +78,9 @@ export WANDB_PROJECT=${WANDB_PROJECT:-CORA_RL}
 PPO_LOGGER=${PPO_LOGGER:-'["console","wandb"]'}
 
 # ── Scaling knobs ────────────────────────────────────────────────────────────
-# NUM_ENVS=4 keeps the batch shape identical to the 0.6B BATCH=128 run for
-# a clean head-to-head. Bump NUM_ENVS to 8/16 later once the 4B run is stable
-# to fully use the 4-GPU rollout throughput.
-NUM_ENVS=${NUM_ENVS:-4}
+# 16 envs x 29 decisions: each batch is 16 full games (464 turns). The earlier 4-env batch
+# (~4 games a step, one sample per prompt) was too little experience per update to learn from.
+NUM_ENVS=${NUM_ENVS:-16}
 # A full game is 29 decisions (ARC_Game cora.env.DECISIONS); the env ends the episode there.
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-29}
 BATCH_SIZE=${BATCH_SIZE:-$((NUM_ENVS * MAX_EPISODE_STEPS))}
@@ -93,7 +95,9 @@ fi
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-2}
 FORWARD_BATCH_SIZE=${FORWARD_BATCH_SIZE:-4}
 PPO_EPOCHS=${PPO_EPOCHS:-2}
-CRITIC_WARMUP=${CRITIC_WARMUP:-20}
+# Steps 1..CRITIC_WARMUP train only the critic, on the step-1 rollout (ray_trainer skips
+# rollouts and actor updates until then).
+CRITIC_WARMUP=${CRITIC_WARMUP:-10}
 ENTROPY_COEFF=${ENTROPY_COEFF:-0.005}
 # DAPO-style decoupled clip: keep lower at 0.2, loosen upper to 0.28 so PPO_EPOCHS=2
 # doesn't crush low-prob exploration tokens (Yu et al. 2025).
@@ -106,7 +110,7 @@ CLIP_RATIO_HIGH=${CLIP_RATIO_HIGH:-0.28}
 # - USE_KL_LOSS + KL_LOSS_COEF + REF_MODEL: anchor KL to BASE Qwen3-4B, not to SFT.
 #   SFT reference would re-freeze the actor at the failure basin (Echo Collapse
 #   per RAGEN / StarPO). Base ref only fights out-of-distribution drift.
-ACTOR_LR=${ACTOR_LR:-3e-6}
+ACTOR_LR=${ACTOR_LR:-1e-5}
 CRITIC_LR=${CRITIC_LR:-1e-5}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.05}
@@ -142,7 +146,11 @@ else
 fi
 MAX_PROMPT=${MAX_PROMPT:-12288}
 MAX_RESP=${MAX_RESP:-768}
-TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+# The run length is TOTAL_TRAINING_STEPS (fit() returns there). The dataset is a placeholder
+# (gsm8k, 7473 rows): one epoch would be only 7473 / BATCH_SIZE steps -- 16 at 464, i.e. 6 actor
+# updates after warmup -- so epochs are set high enough never to be the limit.
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-60}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-100}
 STEP_GAMMA=${STEP_GAMMA:-1.0}
 
 MODEL=${MODEL:-Qwen/Qwen3-4B}
@@ -284,5 +292,5 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     +ray_kwargs.ray_init._temp_dir="$RAY_TMPDIR" \
     +ray_kwargs.ray_init.object_store_memory=$RAY_OBJECT_STORE_MEMORY \
     +ray_kwargs.ray_init.include_dashboard=False \
-    ++ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS:-24} \
+    ++ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS:-30} \
     "$@" 2>&1 | tee "$LOGF"
