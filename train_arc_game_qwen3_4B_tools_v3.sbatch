@@ -73,7 +73,7 @@ if [ -z "${WANDB_API_KEY:-}" ] && [ -r "$HOME/.netrc" ]; then
   unset _wandb_key
 fi
 : "${WANDB_API_KEY:?WANDB_API_KEY must be in env or ~/.netrc}"
-export WANDB_ENTITY=${WANDB_ENTITY:-cpulling}
+export WANDB_ENTITY=${WANDB_ENTITY:-cmu_cora}
 export WANDB_PROJECT=${WANDB_PROJECT:-CORA_RL}
 PPO_LOGGER=${PPO_LOGGER:-'["console","wandb"]'}
 
