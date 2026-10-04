@@ -139,10 +139,14 @@ MULTI_TURN_FORMAT=${MULTI_TURN_FORMAT:-hermes}
 # probe attaches to the dead server and Unity rejects the reconnect as a
 # second client). NUM_ENVS=4 reserves 4 consecutive ports starting from
 # BASE_PORT, so pick a base that leaves headroom before the next job's base.
+# Ports stay in 20000-32767: below 32768 is outside Linux's ephemeral range (32768-60999), where
+# any outgoing connection (vLLM, Ray, NCCL) can take a port first -- job 72564 died on "Address
+# already in use" at 45643 -- and above Ray's worker ports (10002-19999). Blocks of 32 ports
+# (NUM_ENVS <= 32), 380 blocks.
 if [ -n "${SLURM_JOB_ID:-}" ]; then
-  BASE_PORT=${BASE_PORT:-$(( 40000 + (SLURM_JOB_ID * 10) % 10000 ))}
+  BASE_PORT=${BASE_PORT:-$(( 20000 + (SLURM_JOB_ID % 380) * 32 ))}
 else
-  BASE_PORT=${BASE_PORT:-40000}
+  BASE_PORT=${BASE_PORT:-20000}
 fi
 MAX_PROMPT=${MAX_PROMPT:-12288}
 MAX_RESP=${MAX_RESP:-768}
