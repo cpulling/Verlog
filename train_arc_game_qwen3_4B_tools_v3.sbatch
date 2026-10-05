@@ -53,6 +53,12 @@ NUM_GPUS_PER_NODE=${SLURM_GPUS_ON_NODE:-4}
 unset ROCR_VISIBLE_DEVICES
 export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 export VLLM_USE_V1=1
+# vLLM 0.10.0's default attention (FlashAttention) with prefix caching corrupts Qwen3-4B output
+# whenever a replica decodes more than one sequence: 16/16 clean tool calls one at a time, 0/16 as
+# a batch of 16 (malformed JSON, schema text, 700-token rambles to the length cap; job 72568 had
+# 90% empty turns). Triton attention, or prefix caching off, is clean at batch 16 (probe 72587);
+# Triton keeps prefix caching for the shared system prompt. Ray's local workers inherit this.
+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-TRITON_ATTN_VLLM_V1}
 export PYTHONUNBUFFERED=1
 # Distributed init timeout (default 30 min blows up at 4B on 4 GPUs when workers
 # are still loading shards). 2h leaves margin without hiding real hangs.
