@@ -173,6 +173,10 @@ STEP_LAM=${STEP_LAM:-1.0}
 USE_DYNAMIC_BSZ=${USE_DYNAMIC_BSZ:-False}
 PPO_MAX_TOKEN_LEN=${PPO_MAX_TOKEN_LEN:-10240}
 FWD_MAX_TOKEN_LEN=${FWD_MAX_TOKEN_LEN:-$PPO_MAX_TOKEN_LEN}
+# Keep the actor's and critic's Adam state in CPU memory: frees ~8 GB per model per GPU, the room
+# that larger dynamic batches need (at 20k tokens/GPU the update ran out of memory, profile 73433).
+# The optimizer step runs on CPU twice per update; parameters stay on GPU (no extra PCIe traffic).
+OPTIM_OFFLOAD=${OPTIM_OFFLOAD:-False}
 
 MODEL=${MODEL:-Qwen/Qwen3-4B}
 
@@ -258,7 +262,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH} \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OPTIM_OFFLOAD} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.40 \
@@ -282,7 +286,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
     critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.model.fsdp_config.optimizer_offload=${OPTIM_OFFLOAD} \
     critic.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
     critic.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN} \
     critic.forward_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN} \
