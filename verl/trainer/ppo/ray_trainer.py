@@ -1174,11 +1174,14 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     
-                    # skip rollout from step 2 to step `critic_warmup`
+                    # During critic warmup the actor is frozen, but each step still plays fresh games
+                    # unless critic_warmup_reuse_rollout keeps re-using step 1's rollout.
                     is_first_step = self.global_steps == 1
                     is_warmup = self.config.trainer.critic_warmup >= self.global_steps
-                    
-                    if not is_warmup or is_first_step:
+                    reuse = is_warmup and not is_first_step and \
+                        self.config.trainer.get("critic_warmup_reuse_rollout", False)
+
+                    if not reuse:
                     
                         # generate a batch
                         with marked_timer("gen", timing_raw, color="red"):

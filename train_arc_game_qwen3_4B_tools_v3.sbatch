@@ -116,7 +116,8 @@ CLIP_RATIO_HIGH=${CLIP_RATIO_HIGH:-0.28}
 # - USE_KL_LOSS + KL_LOSS_COEF + REF_MODEL: anchor KL to BASE Qwen3-4B, not to SFT.
 #   SFT reference would re-freeze the actor at the failure basin (Echo Collapse
 #   per RAGEN / StarPO). Base ref only fights out-of-distribution drift.
-ACTOR_LR=${ACTOR_LR:-1e-5}
+# 1e-5 (run 72590) gave two 0.12-0.13 PPO-KL jumps on the first updates; halved.
+ACTOR_LR=${ACTOR_LR:-5e-6}
 CRITIC_LR=${CRITIC_LR:-1e-5}
 USE_KL_LOSS=${USE_KL_LOSS:-True}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.05}
@@ -162,6 +163,16 @@ MAX_RESP=${MAX_RESP:-768}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-60}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-100}
 STEP_GAMMA=${STEP_GAMMA:-1.0}
+# Step-level GAE lambda. 1.0 = the critic's targets are the actual game returns, so it serves as a
+# baseline and cannot chase its own bootstrapped estimates (at 0.95 run 72590's values ran to 6 in
+# a ~1.1-point game, explained variance as low as -8.9).
+STEP_LAM=${STEP_LAM:-1.0}
+# Update throughput. Dynamic batching packs sequences up to *_MAX_TOKEN_LEN tokens per GPU per
+# micro-batch instead of a fixed MICRO_BATCH_SIZE rows: fewer micro-batches, so fewer FSDP
+# all-gathers / reduce-scatters per update. Off by default until profiled.
+USE_DYNAMIC_BSZ=${USE_DYNAMIC_BSZ:-False}
+PPO_MAX_TOKEN_LEN=${PPO_MAX_TOKEN_LEN:-10240}
+FWD_MAX_TOKEN_LEN=${FWD_MAX_TOKEN_LEN:-$PPO_MAX_TOKEN_LEN}
 
 MODEL=${MODEL:-Qwen/Qwen3-4B}
 
@@ -220,6 +231,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     algorithm.use_kl_in_reward=False \
     algorithm.step_gamma=${STEP_GAMMA} \
+    algorithm.step_lam=${STEP_LAM} \
     data.train_files=${DATA_DIR}/train.parquet \
     data.val_files=${DATA_DIR}/test.parquet \
     data.train_batch_size=${BATCH_SIZE} \
@@ -256,9 +268,12 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.format=${MULTI_TURN_FORMAT} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=10240 \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=10240 \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=10240 \
+    actor_rollout_ref.actor.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN} \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN} \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN} \
     critic.optim.lr=${CRITIC_LR} \
     critic.model.use_remove_padding=True \
     critic.model.path=${MODEL} \
@@ -268,8 +283,9 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
-    critic.ppo_max_token_len_per_gpu=10240 \
-    critic.forward_max_token_len_per_gpu=10240 \
+    critic.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
+    critic.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN} \
+    critic.forward_max_token_len_per_gpu=${FWD_MAX_TOKEN_LEN} \
     critic.forward_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     trainer.balance_batch=False \
     trainer.logger="${PPO_LOGGER}" \

@@ -210,6 +210,11 @@ trainer:
   # During critic warmpup, we will only use 1/critic_warmup_batch_divide_ratio of the batch to update critic
   critic_warmup_batch_divide_ratio: 1
 
+  # Reuse step 1's rollout for every critic-warmup step instead of generating fresh games. The
+  # critic then refits one batch critic_warmup times and chases its own bootstrapped targets (CORA
+  # run 72590: explained variance down to -8.9, mean value 6.1 in a ~1.1-point game). Off by default.
+  critic_warmup_reuse_rollout: false
+
   # Default path to distributed filesystem for saving checkpoints
   default_hdfs_dir: null
 
