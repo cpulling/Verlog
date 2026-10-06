@@ -53,6 +53,10 @@ NUM_GPUS_PER_NODE=${SLURM_GPUS_ON_NODE:-4}
 unset ROCR_VISIBLE_DEVICES
 export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS_PER_NODE-1)))
 export VLLM_USE_V1=1
+# GPU-to-GPU collectives on Auton's A6000 nodes: the direct peer-to-peer path runs at ~0.66 GiB/s
+# (PCIe Gen4 x16, P2P "enabled"), while staging through host memory gets 1.55-1.85 GiB/s; the FSDP
+# update is communication-bound, so this alone took a step from 1474 s to 995 s (profile 73737).
+export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
 # vLLM 0.10.0's default attention (FlashAttention) with prefix caching corrupts Qwen3-4B output
 # whenever a replica decodes more than one sequence: 16/16 clean tool calls one at a time, 0/16 as
 # a batch of 16 (malformed JSON, schema text, 700-token rambles to the length cap; job 72568 had
@@ -169,10 +173,13 @@ STEP_GAMMA=${STEP_GAMMA:-1.0}
 STEP_LAM=${STEP_LAM:-1.0}
 # Update throughput. Dynamic batching packs sequences up to *_MAX_TOKEN_LEN tokens per GPU per
 # micro-batch instead of a fixed MICRO_BATCH_SIZE rows: fewer micro-batches, so fewer FSDP
-# all-gathers / reduce-scatters per update. Off by default until profiled.
-USE_DYNAMIC_BSZ=${USE_DYNAMIC_BSZ:-False}
-PPO_MAX_TOKEN_LEN=${PPO_MAX_TOKEN_LEN:-10240}
-FWD_MAX_TOKEN_LEN=${FWD_MAX_TOKEN_LEN:-$PPO_MAX_TOKEN_LEN}
+# all-gathers / reduce-scatters per update. Profile 73737 (gpu29, one actor+critic update on 144
+# rows): 14k packed tokens per GPU cut the update ~2x on top of the NCCL change below; 24k and 32k
+# run out of memory (the packed batch's vocabulary logits), even with optimizer state on CPU. The
+# limit must stay >= the longest sequence (max prompt + response = 13,056).
+USE_DYNAMIC_BSZ=${USE_DYNAMIC_BSZ:-True}
+PPO_MAX_TOKEN_LEN=${PPO_MAX_TOKEN_LEN:-14336}
+FWD_MAX_TOKEN_LEN=${FWD_MAX_TOKEN_LEN:-28672}
 # Keep the actor's and critic's Adam state in CPU memory: frees ~8 GB per model per GPU, the room
 # that larger dynamic batches need (at 20k tokens/GPU the update ran out of memory, profile 73433).
 # The optimizer step runs on CPU twice per update; parameters stay on GPU (no extra PCIe traffic).
