@@ -57,6 +57,8 @@ export VLLM_USE_V1=1
 # (PCIe Gen4 x16, P2P "enabled"), while staging through host memory gets 1.55-1.85 GiB/s; the FSDP
 # update is communication-bound, so this alone took a step from 1474 s to 995 s (profile 73737).
 export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+# Fewer fragmentation-driven OOMs when packed batch sizes vary step to step.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # vLLM 0.10.0's default attention (FlashAttention) with prefix caching corrupts Qwen3-4B output
 # whenever a replica decodes more than one sequence: 16/16 clean tool calls one at a time, 0/16 as
 # a batch of 16 (malformed JSON, schema text, 700-token rambles to the length cap; job 72568 had
@@ -180,6 +182,11 @@ STEP_LAM=${STEP_LAM:-1.0}
 USE_DYNAMIC_BSZ=${USE_DYNAMIC_BSZ:-True}
 PPO_MAX_TOKEN_LEN=${PPO_MAX_TOKEN_LEN:-14336}
 FWD_MAX_TOKEN_LEN=${FWD_MAX_TOKEN_LEN:-28672}
+# The ACTOR update also scores every packed token against the full vocabulary; at 14k tokens per GPU
+# its first update ran out of memory on full-length games (run 73827, step 11, after a clean
+# critic warmup). The actor therefore keeps fixed micro-batches (MICRO_BATCH_SIZE rows) unless
+# ACTOR_USE_DYNAMIC_BSZ=True; the critic and the forward-only log-prob passes still pack.
+ACTOR_USE_DYNAMIC_BSZ=${ACTOR_USE_DYNAMIC_BSZ:-False}
 # Keep the actor's and critic's Adam state in CPU memory: frees ~8 GB per model per GPU, the room
 # that larger dynamic batches need (at 20k tokens/GPU the update ran out of memory, profile 73433).
 # The optimizer step runs on CPU twice per update; parameters stay on GPU (no extra PCIe traffic).
@@ -279,7 +286,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.multi_turn.format=${MULTI_TURN_FORMAT} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${FORWARD_BATCH_SIZE} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
+    actor_rollout_ref.actor.use_dynamic_bsz=${ACTOR_USE_DYNAMIC_BSZ} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN} \
