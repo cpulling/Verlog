@@ -32,6 +32,9 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-/zfsauton/scratch/cpulling/CORA/Verlog}
 ARC_GAME_PATH=${ARC_GAME_PATH:-/zfsauton/scratch/cpulling/CORA/ARC_Game/ARC_Game_New}
 ARC_GAME_BUILD=${ARC_GAME_PATH}/Build/Headless/Linux/ARC_Headless.x86_64
+# unity: the headless build above. sim: ARC_Game's surrogate (oracle.sim.SimEnv), ~1 ms a turn with
+# no Unity process; its final scores match Unity 1.0.2 on every replayed game (ARC_Game rl/cora_env.py).
+ARC_BACKEND=${ARC_BACKEND:-unity}
 
 # Path-style activation of the verlog conda env
 export PATH=/zfsauton/scratch/cpulling/conda_envs/verlog/bin:$PATH
@@ -57,8 +60,10 @@ export VLLM_USE_V1=1
 # (PCIe Gen4 x16, P2P "enabled"), while staging through host memory gets 1.55-1.85 GiB/s; the FSDP
 # update is communication-bound, so this alone took a step from 1474 s to 995 s (profile 73737).
 export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
-# Fewer fragmentation-driven OOMs when packed batch sizes vary step to step.
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# expandable_segments:True would cut fragmentation when packed batch sizes vary, but vLLM's sleep
+# mode refuses it ("Expandable segments are not compatible with memory pool"; smoke 87309 hung
+# until its time limit), so it stays off.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}
 # vLLM 0.10.0's default attention (FlashAttention) with prefix caching corrupts Qwen3-4B output
 # whenever a replica decodes more than one sequence: 16/16 clean tool calls one at a time, 0/16 as
 # a batch of 16 (malformed JSON, schema text, 700-token rambles to the length cap; job 72568 had
@@ -330,6 +335,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     envs.arc_game_kwargs.unity_port=${BASE_PORT} \
     envs.arc_game_kwargs.max_steps=${MAX_EPISODE_STEPS} \
     envs.arc_game_kwargs.unity_exe=${ARC_GAME_BUILD} \
+    ++envs.arc_game_kwargs.backend=${ARC_BACKEND} \
     +envs.arc_game_kwargs.format_penalty=$FORMAT_PENALTY \
     +envs.arc_game_kwargs.semantic_penalty=$SEMANTIC_PENALTY \
     +envs.arc_game_kwargs.format_bonus=$FORMAT_BONUS \
