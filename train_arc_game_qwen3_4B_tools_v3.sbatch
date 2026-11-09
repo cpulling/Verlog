@@ -101,7 +101,20 @@ NUM_ENVS=${NUM_ENVS:-16}
 # A full game is 29 decisions (ARC_Game cora.env.DECISIONS); the env ends the episode there.
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-29}
 BATCH_SIZE=${BATCH_SIZE:-$((NUM_ENVS * MAX_EPISODE_STEPS))}
+# Each env plays one whole game per step, so a batch is NUM_ENVS complete games (BATCH_SIZE must
+# then be NUM_ENVS x 29). Off = the shared turn counter: envs run on across steps and the batch is
+# cut at BATCH_SIZE turns, mid-game for some envs and with the fastest envs over-sampled.
+FULL_EPISODES=${FULL_EPISODES:-True}
+# Critic warm-up games played by ARC_Game search agents instead of the model, round-robin over the
+# envs: "algo:budget,..." with algo = mcts | rhea | uct-f7 | rules. Empty = the model plays them.
+WARMUP_POLICIES=${WARMUP_POLICIES:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
+# Critic optimizer steps per step = rows / this; the actor keeps MINI_BATCH_SIZE.
+CRITIC_MINI_BATCH_SIZE=${CRITIC_MINI_BATCH_SIZE:-$MINI_BATCH_SIZE}
+# Offline critic dataset (generate_critic_dataset.py): pretrain chunks, then this share of replay.
+CRITIC_DATASET=${CRITIC_DATASET:-}
+CRITIC_PRETRAIN_CHUNKS=${CRITIC_PRETRAIN_CHUNKS:-0}
+CRITIC_REPLAY_FRAC=${CRITIC_REPLAY_FRAC:-0.25}
 # The trainer appends each env's s_{T+1} for bootstrapping, so it splits BATCH_SIZE + NUM_ENVS rows
 # across the GPUs; an uneven split dies at compute_log_prob ("only support equal chunk") after the
 # whole rollout has run. Fail here instead.
@@ -198,6 +211,9 @@ ACTOR_USE_DYNAMIC_BSZ=${ACTOR_USE_DYNAMIC_BSZ:-False}
 OPTIM_OFFLOAD=${OPTIM_OFFLOAD:-False}
 
 MODEL=${MODEL:-Qwen/Qwen3-4B}
+# System prompt: an ARC_Game prompt pack (prompts/<name>.json). Leave PROMPT_PACK unset: the run
+# then plays ARC_Game's cora.prompts.DEFAULT_PACK, the prompt the benchmark runs, resolved below.
+PROMPT_PACK=${PROMPT_PACK:-}
 
 # Reward-shaping penalties (match 0.6B setup)
 FORMAT_PENALTY=${FORMAT_PENALTY:-0.05}
@@ -205,6 +221,8 @@ SEMANTIC_PENALTY=${SEMANTIC_PENALTY:-0.05}
 # Flat holistic-correctness bonus. Cap on total format-negative = -FORMAT_BONUS,
 # so best/worst format outcomes are symmetric ±R. Set to 0 to disable bonus.
 FORMAT_BONUS=${FORMAT_BONUS:-0.10}
+# A turn with no call at all (passing the decision); unset = FORMAT_PENALTY, as before.
+EMPTY_PENALTY=${EMPTY_PENALTY:-$FORMAT_PENALTY}
 
 TAG=${TAG:-$(date +%m%d_%H%M)}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_4b_tools_${TAG}}
@@ -240,9 +258,41 @@ trap cleanup EXIT INT TERM
 CONFIG_PATH="$(pwd)/examples/sglang_multiturn/config"
 DATA_DIR=${DATA_DIR:-/zfsauton/scratch/cpulling/data/gsm8k}
 
+# The prompt the policy will see, rendered by CoraEnv itself (no game is launched), against the
+# benchmark's (DEFAULT_PACK). RL results are only comparable with benchmark records of the same
+# prompt_sha, so a different prompt stops the job unless ALLOW_NONBENCHMARK_PROMPT=1.
+PROMPT_INFO=$(cd "$ARC_GAME_PATH" && python3 -c '
+import sys
+from cora import prompts
+from rl.cora_env import CoraEnv, CoraEnvConfig
+pack = sys.argv[1] or prompts.DEFAULT_PACK
+sha = CoraEnv(CoraEnvConfig(prompt=pack)).prompt_sha
+print(pack, sha, CoraEnv(CoraEnvConfig(prompt=prompts.DEFAULT_PACK)).prompt_sha)
+' "$PROMPT_PACK") || { echo "[prompt] could not render the prompt pack '$PROMPT_PACK' from $ARC_GAME_PATH"; exit 1; }
+read -r PROMPT_PACK PROMPT_SHA BENCH_PROMPT_SHA <<< "$PROMPT_INFO"
+echo "[prompt] pack=$PROMPT_PACK prompt_sha=$PROMPT_SHA (benchmark: $BENCH_PROMPT_SHA)"
+# The benchmark prompt itself is pinned here too (as in ARC_Game tests/test_prompts.py), so an ARC_Game
+# copy with an older default cannot pass the check above by agreeing with itself.
+if [ "$BENCH_PROMPT_SHA" != "${BENCHMARK_PROMPT_SHA:-6992cc02aa02}" ]; then
+  echo "[prompt] $ARC_GAME_PATH renders the benchmark prompt as $BENCH_PROMPT_SHA, expected ${BENCHMARK_PROMPT_SHA:-6992cc02aa02} (minimal_v7): update that ARC_Game copy"
+  exit 1
+fi
+if [ "$PROMPT_SHA" != "$BENCH_PROMPT_SHA" ] && [ "${ALLOW_NONBENCHMARK_PROMPT:-0}" != "1" ]; then
+  echo "[prompt] $PROMPT_PACK is not the benchmark prompt; set ALLOW_NONBENCHMARK_PROMPT=1 to train on it anyway"
+  exit 1
+fi
+# An offline critic dataset carries the prompt its rows were rendered with (<dataset>.meta.json).
+if [ -n "${CRITIC_DATASET:-}" ]; then
+  DATA_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["prompt_sha"])' "$CRITIC_DATASET.meta.json" 2>/dev/null)
+  if [ "$DATA_SHA" != "$PROMPT_SHA" ]; then
+    echo "[prompt] critic dataset $CRITIC_DATASET was rendered with prompt_sha '${DATA_SHA:-unknown (no .meta.json)}', this run uses $PROMPT_SHA"
+    exit 1
+  fi
+fi
+
 LOGF="$REPO_DIR/logs/qwen3_4b/${EXPERIMENT_NAME}.log"
 echo "=== $EXPERIMENT_NAME job $SLURM_JOB_ID on $SLURMD_NODENAME @ $(date) ==="
-echo "MODEL=$MODEL NUM_ENVS=$NUM_ENVS BATCH=$BATCH_SIZE MINI=$MINI_BATCH_SIZE MICRO=$MICRO_BATCH_SIZE PPO_EPOCHS=$PPO_EPOCHS"
+echo "MODEL=$MODEL NUM_ENVS=$NUM_ENVS BATCH=$BATCH_SIZE MINI=$MINI_BATCH_SIZE MICRO=$MICRO_BATCH_SIZE PPO_EPOCHS=$PPO_EPOCHS FULL_EPISODES=$FULL_EPISODES PROMPT_PACK=$PROMPT_PACK PROMPT_SHA=$PROMPT_SHA CRITIC_WARMUP=$CRITIC_WARMUP WARMUP_POLICIES=$WARMUP_POLICIES SEMANTIC_PENALTY=$SEMANTIC_PENALTY"
 echo "checkpoint dir: $CKPT_DIR   save_freq: $SAVE_FREQ"
 echo "trajectory log: $ARC_TRAJECTORY_LOG"
 echo "stdout log:     $LOGF"
@@ -303,7 +353,7 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_epochs=${PPO_EPOCHS} \
     critic.ppo_micro_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
-    critic.ppo_mini_batch_size=${MINI_BATCH_SIZE} \
+    critic.ppo_mini_batch_size=${CRITIC_MINI_BATCH_SIZE} \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=${OPTIM_OFFLOAD} \
     critic.use_dynamic_bsz=${USE_DYNAMIC_BSZ} \
@@ -329,6 +379,8 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     trainer.max_actor_ckpt_to_keep=${MAX_CKPT_TO_KEEP} \
     +trainer.rollout_data_dir="${ROLLOUT_DUMP_DIR}" \
     envs.num_envs=${NUM_ENVS} \
+    ++envs.full_episodes=${FULL_EPISODES} \
+    "++envs.warmup_policies='${WARMUP_POLICIES}'" \
     envs.env_name=arc_game \
     envs.task='ARC disaster response' \
     envs.captioner.type=cora \
@@ -336,9 +388,14 @@ numactl --interleave=all python3 -m verl.trainer.main_ppo \
     envs.arc_game_kwargs.max_steps=${MAX_EPISODE_STEPS} \
     envs.arc_game_kwargs.unity_exe=${ARC_GAME_BUILD} \
     ++envs.arc_game_kwargs.backend=${ARC_BACKEND} \
+    ++envs.arc_game_kwargs.prompt=${PROMPT_PACK} \
     +envs.arc_game_kwargs.format_penalty=$FORMAT_PENALTY \
     +envs.arc_game_kwargs.semantic_penalty=$SEMANTIC_PENALTY \
     +envs.arc_game_kwargs.format_bonus=$FORMAT_BONUS \
+    +envs.arc_game_kwargs.empty_penalty=$EMPTY_PENALTY \
+    ++trainer.critic_dataset="${CRITIC_DATASET}" \
+    ++trainer.critic_pretrain_chunks=${CRITIC_PRETRAIN_CHUNKS} \
+    ++trainer.critic_replay_frac=${CRITIC_REPLAY_FRAC} \
     +ray_kwargs.ray_init._temp_dir="$RAY_TMPDIR" \
     +ray_kwargs.ray_init.object_store_memory=$RAY_OBJECT_STORE_MEMORY \
     +ray_kwargs.ray_init.include_dashboard=False \
