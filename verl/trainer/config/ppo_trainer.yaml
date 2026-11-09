@@ -348,6 +348,13 @@ envs:
   # number of parallel environments
   num_envs: 32
 
+  # each env plays exactly one whole episode per rollout (tool_agent loop)
+  full_episodes: False
+
+  # during the critic warm-up, env i's games are played by the i-th of these ARC_Game search
+  # agents ("algo:budget,..."; oracle.search.Agent) instead of the model; empty = the model
+  warmup_policies: ""
+
   # name of the environment, e.g., "babyai", "crafter", "babaisai", etc.
   env_name: babyai
 

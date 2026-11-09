@@ -97,6 +97,20 @@ class ToolAgentLoop(AgentLoopBase):
         tool_config_path = config.actor_rollout_ref.rollout.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tool_config_path) if tool_config_path else []
         cls.tools = {tool.name: tool for tool in tool_list}
+        # full_episodes: each env plays exactly one whole episode per rollout (the batch is
+        # num_envs complete games) instead of stepping until the shared turn counter fills, which
+        # cuts games at the batch edge and over-samples the faster envs.
+        cls.full_episodes = bool(config.envs.get("full_episodes", False))
+        # warmup_policies: during the critic warm-up steps, env i plays its games with the i-th
+        # (round-robin) of these ARC_Game search agents instead of the model -- "algo:budget,...",
+        # algo = mcts | rhea | uct-f7 | rules (oracle.search.Agent, fair information). The agent's
+        # calls are written as the model's Hermes <tool_call> text, so the critic is fitted on the
+        # returns of good play. Empty = the model plays every step.
+        spec = str(config.envs.get("warmup_policies", "") or "")
+        cls.warmup_policies = [p.strip() for p in spec.split(",") if p.strip()]
+        cls.critic_warmup = int(config.trainer.get("critic_warmup", 0) or 0)
+        if cls.warmup_policies and not cls.full_episodes:
+            raise ValueError("envs.warmup_policies needs envs.full_episodes (a game must not straddle the switch)")
         cls.tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer)
         print(f"Initialized tools: {cls.tools}")
@@ -109,7 +123,39 @@ class ToolAgentLoop(AgentLoopBase):
         )
 
     @rollout_trace_op
-    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool, **kwargs) -> List[AgentLoopOutput]:
+    def _scripted_agent(self, env_idx: int, global_step: int):
+        """The search agent playing this env's game, during the critic warm-up only (else None)."""
+        if not self.warmup_policies or global_step < 1 or global_step > self.critic_warmup:
+            return None
+        import random
+        from oracle.search import Agent     # ARC_Game, on sys.path once the arc_game env is built
+        algo, _, budget = self.warmup_policies[env_idx % len(self.warmup_policies)].partition(":")
+        return Agent(algo, int(budget or 0), "fair", seed=random.SystemRandom().randrange(2**31))
+
+    @staticmethod
+    def _sim_game(env):
+        """The SimEnv under the Balrog/CoraVerlogEnv wrappers."""
+        e = env.env
+        while not hasattr(e, "cora"):
+            e = e.env
+        return e.cora.game
+
+    def _scripted_turn(self, agent, env, decision: int, metrics: dict):
+        """The agent's calls as the response tokens the model would have produced, and the action
+        dict the env takes. Calls that would not fit in response_length are dropped from the end."""
+        calls = [(name, json.dumps(args)) for name, args in agent.calls(self._sim_game(env), decision)]
+        while True:
+            text = "\n".join('<tool_call>\n{"name": %s, "arguments": %s}\n</tool_call>' % (json.dumps(n), a)
+                             for n, a in calls)
+            ids = self.tokenizer.encode(text, add_special_tokens=False) + [self.tokenizer.eos_token_id]
+            if len(ids) <= self.response_length or not calls:
+                break
+            calls = calls[:-1]
+            metrics["behavior/scripted_calls_cut"] = metrics.get("behavior/scripted_calls_cut", 0) + 1
+        return ids[: self.response_length], {"raw_text": text, "content": "", "tool_calls": calls}
+
+    async def run(self, env, counter, env_idx: int, sampling_params: dict[str, Any], is_val: bool,
+                  global_step: int = -1, **kwargs) -> List[AgentLoopOutput]:
 
         if is_val:
             messages, info = env.reset()
@@ -133,62 +179,71 @@ class ToolAgentLoop(AgentLoopBase):
         outputs = []
         num_turns = 0
         reward = 0.0
+        agent = None if is_val else self._scripted_agent(env_idx, global_step)
         while True:
-            
-            with simple_timer("generate_sequences", metrics):
-                output = await self.server_manager.generate(
-                    request_id=request_id,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=None,
-                )
-            
-            # truncate response_ids to response_length
-            response_ids = output.token_ids[: self.response_length]
-            response_mask = [1] * len(response_ids)
-            
-            assert len(prompt_ids) <= self.prompt_length
-            assert len(response_ids) <= self.response_length
-            
-            if output.log_probs:
-                response_logprobs = output.log_probs[: self.response_length]
-            
-            # Two action-emission modes:
-            #  - text mode (default): decoded assistant text goes to env.step(str)
-            #  - tool-call mode: when tool_schemas is non-empty (multi_turn.tool_config_path
-            #    set), route through HermesToolParser. If it finds >=1 <tool_call> blocks,
-            #    hand env.step a dict {"raw_text", "content", "tool_calls":[(name, args_json)]}
-            #    so the env can dispatch structured calls. If parsing finds zero calls
-            #    (early training / model still emitting regex tags), fall back to raw text —
-            #    env.step handles both shapes.
-            if self.tool_schemas:
-                content, function_calls = await self.tool_parser.extract_tool_calls(response_ids)
-                raw_text = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
-                )
-                if function_calls:
-                    actions = {
-                        "raw_text": raw_text,
-                        "content": content,
-                        "tool_calls": [(fc.name, fc.arguments) for fc in function_calls],
-                    }
-                    metrics.setdefault("behavior/tool_call_turns", 0)
-                    metrics["behavior/tool_call_turns"] += 1
-                    metrics.setdefault("behavior/tool_calls_per_turn", []).append(len(function_calls))
-                else:
-                    actions = raw_text
-                    metrics.setdefault("behavior/tool_call_empty_turns", 0)
-                    metrics["behavior/tool_call_empty_turns"] += 1
+
+            if agent is not None:
+                with simple_timer("generate_sequences", metrics):
+                    response_ids, actions = await self.loop.run_in_executor(
+                        None, lambda: self._scripted_turn(agent, env, num_turns, metrics))
+                response_mask = [1] * len(response_ids)
+                output = None
+                metrics["behavior/scripted_turns"] = metrics.get("behavior/scripted_turns", 0) + 1
             else:
-                actions = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
-                )
+                with simple_timer("generate_sequences", metrics):
+                    output = await self.server_manager.generate(
+                        request_id=request_id,
+                        prompt_ids=prompt_ids,
+                        sampling_params=sampling_params,
+                        image_data=None,
+                    )
+
+                # truncate response_ids to response_length
+                response_ids = output.token_ids[: self.response_length]
+                response_mask = [1] * len(response_ids)
+            
+                assert len(prompt_ids) <= self.prompt_length
+                assert len(response_ids) <= self.response_length
+            
+                if output.log_probs:
+                    response_logprobs = output.log_probs[: self.response_length]
+            
+                # Two action-emission modes:
+                #  - text mode (default): decoded assistant text goes to env.step(str)
+                #  - tool-call mode: when tool_schemas is non-empty (multi_turn.tool_config_path
+                #    set), route through HermesToolParser. If it finds >=1 <tool_call> blocks,
+                #    hand env.step a dict {"raw_text", "content", "tool_calls":[(name, args_json)]}
+                #    so the env can dispatch structured calls. If parsing finds zero calls
+                #    (early training / model still emitting regex tags), fall back to raw text —
+                #    env.step handles both shapes.
+                if self.tool_schemas:
+                    content, function_calls = await self.tool_parser.extract_tool_calls(response_ids)
+                    raw_text = await self.loop.run_in_executor(
+                        None,
+                        lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                    )
+                    if function_calls:
+                        actions = {
+                            "raw_text": raw_text,
+                            "content": content,
+                            "tool_calls": [(fc.name, fc.arguments) for fc in function_calls],
+                        }
+                        metrics.setdefault("behavior/tool_call_turns", 0)
+                        metrics["behavior/tool_call_turns"] += 1
+                        metrics.setdefault("behavior/tool_calls_per_turn", []).append(len(function_calls))
+                    else:
+                        actions = raw_text
+                        metrics.setdefault("behavior/tool_call_empty_turns", 0)
+                        metrics["behavior/tool_call_empty_turns"] += 1
+                else:
+                    actions = await self.loop.run_in_executor(
+                        None,
+                        lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                    )
 
             last_prompt_ids = copy.deepcopy(prompt_ids)
             is_full = await counter.is_full.remote()
-            if is_full and not is_val:
+            if is_full and not is_val and not self.full_episodes:
                 break
             
             # Store observation before step (always, for loop detection)
@@ -204,7 +259,7 @@ class ToolAgentLoop(AgentLoopBase):
                 prompt_ids=prompt_ids,
                 response_ids=response_ids,
                 response_mask=response_mask,
-                response_logprobs=response_logprobs if output.log_probs else None,
+                response_logprobs=response_logprobs if output is not None and output.log_probs else None,
                 metrics=metrics,
                 rewards=reward,
                 done=done,
@@ -227,7 +282,11 @@ class ToolAgentLoop(AgentLoopBase):
             
             # double check if we have reached max turns
             is_full = await counter.increment.remote()
-            if is_full and not is_val:
+            if self.full_episodes and not is_val:
+                outputs.append(turn_data)
+                if done:
+                    break   # the env auto-resets, so the next rollout starts a fresh game
+            elif is_full and not is_val:
                 break # will discard the last turn data
             else:
                 outputs.append(turn_data)

@@ -537,7 +537,8 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             is_val = batch.meta_info.get("validate", False)
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val, **kwargs)))
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], counter, env_idx, is_val,
+                                                                     global_step=batch.meta_info.get("global_steps", -1), **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs[0])
@@ -552,6 +553,7 @@ class AgentLoopWorker:
         is_val: bool,
         *,
         agent_name: str,
+        global_step: int = -1,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
         with rollout_trace_attr(
@@ -574,7 +576,8 @@ class AgentLoopWorker:
                 processor=self.processor,
             )
             env = self.val_env if is_val else self.env
-            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val, **kwargs)
+            outputs: AgentLoopOutput = await agent_loop.run(env, counter, env_idx, sampling_params, is_val,
+                                                             global_step=global_step, **kwargs)
 
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -959,6 +962,12 @@ class AgentLoopManager:
             ]
         )
         output = DataProto.concat(outputs)
+        # Whole episodes fill the batch only when every game has the same length: num_envs games
+        # of batch_size / num_envs turns, plus each env's bootstrap row.
+        if self.config.envs.get("full_episodes", False) and not prompts.meta_info.get("validate", False) \
+                and len(output) != gen_batch_size + num_envs:
+            raise RuntimeError(f"full_episodes: rollout gave {len(output)} rows, expected {gen_batch_size} turns "
+                               f"+ {num_envs} bootstrap rows; set BATCH_SIZE = NUM_ENVS x the episode length")
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
 

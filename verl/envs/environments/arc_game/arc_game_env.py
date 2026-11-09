@@ -109,7 +109,7 @@ def make_arc_game_env(env_name, task, config, render_mode: Optional[str] = None)
     """config.envs.arc_game_kwargs: CoraEnvConfig fields (prompt, ablation, manual_transfers,
     obs_encoding, max_steps, seed, map_config, param_config, unity_exe, unity_log_dir) plus
     unity_port (the base port; workers take base..base+num_envs-1) and the reward-shaping knobs
-    format_penalty / semantic_penalty / format_bonus."""
+    format_penalty / semantic_penalty / format_bonus / empty_penalty."""
     arc_path = _resolve_arc_game_path()
     if not (arc_path / "rl" / "cora_env.py").exists():
         raise FileNotFoundError(f"CoraEnv not found under {arc_path}. Set ARC_GAME_PATH to the "
@@ -129,7 +129,7 @@ def make_arc_game_env(env_name, task, config, render_mode: Optional[str] = None)
     if cache_key in _ENV_CACHE:
         return _ENV_CACHE[cache_key]
     port = _claim_port_slot(base_port, num_envs)
-    shaping = {k: kw.pop(k) for k in ("format_penalty", "semantic_penalty", "format_bonus") if k in kw}
+    shaping = {k: kw.pop(k) for k in ("format_penalty", "semantic_penalty", "format_bonus", "empty_penalty") if k in kw}
     log_dir = kw.pop("unity_log_dir", os.environ.get("ARC_GAME_UNITY_LOG_DIR"))
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)

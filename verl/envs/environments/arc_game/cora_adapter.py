@@ -16,12 +16,18 @@ import gymnasium as gym
 # Verlog's tool_agent_loop hands over {"raw_text", "content", "tool_calls": [(name, args_json)]}
 # when the model emitted <tool_call> blocks, or the decoded text when it emitted none.
 ACTION_TYPES = ("build", "hire", "train", "staff", "deconstruct", "task", "transfer")
+# HermesToolParser drops a <tool_call> block whose JSON it cannot read, and returns the bare text when
+# no block parses or a block is cut off at the length cap: the adapter counts the blocks the model
+# opened against the calls it received, so a broken call is a format error and not a silent no-op.
+TOOL_CALL_OPEN = "<tool_call>"
 
 
 class CoraVerlogEnv(gym.Env):
     def __init__(self, cora_env, format_penalty: float = 0.0, semantic_penalty: float = 0.0,
-                 format_bonus: float = 0.0):
-        """format_penalty: subtracted on a turn with no calls or with a malformed/invalid call.
+                 format_bonus: float = 0.0, empty_penalty: float | None = None):
+        """format_penalty: subtracted on a turn with a malformed or invalid call (including a
+        <tool_call> block the parser dropped). empty_penalty: subtracted on a turn with no call
+        at all, i.e. passing the decision (default: format_penalty, the earlier behaviour).
         semantic_penalty: subtracted per call the game refused. format_bonus: added on a turn
         whose calls all executed; when set, a turn's total penalty is capped at -format_bonus."""
         super().__init__()
@@ -31,6 +37,8 @@ class CoraVerlogEnv(gym.Env):
         self.action_space = gym.spaces.Sequence(gym.spaces.Text(max_length=4096))
         self.format_penalty, self.semantic_penalty, self.format_bonus = \
             float(format_penalty), float(semantic_penalty), float(format_bonus)
+        self.empty_penalty = self.format_penalty if empty_penalty is None else float(empty_penalty)
+        self._dropped = 0                       # <tool_call> blocks of the pending action that didn't parse
         self._ep = {}
         # BALROG helper API that Verlog's wrappers read; tool calls have no discrete action space.
         self.language_action_space: list = []
@@ -51,26 +59,35 @@ class CoraVerlogEnv(gym.Env):
     def reset(self, **kwargs):
         user, info = self.cora.reset()
         self._ep = {"turns": 0, "score_return": 0.0, **{f"n_{t}": 0 for t in ACTION_TYPES},
-                    "calls": 0, "executed": 0, "refused": 0, "invalid": 0, "malformed_turns": 0}
+                    "calls": 0, "executed": 0, "refused": 0, "invalid": 0, "malformed_turns": 0,
+                    "dropped": 0, "empty_turns": 0}
         info["metrics"] = self._metrics(info, {}, terminal=False)
         return self._obs(user), info
 
     def extract_action(self, action):
         """(raw model output, the tool calls, None, {}): validity is decided by execution in step()."""
         if isinstance(action, dict) and "tool_calls" in action:      # cora.executor parses the arguments
-            return str(action.get("raw_text") or ""), list(action["tool_calls"]), None, {}
-        return str(action), [], None, {}
+            raw, calls = str(action.get("raw_text") or ""), list(action["tool_calls"])
+        else:
+            raw, calls = str(action), []
+        self._dropped = max(0, raw.count(TOOL_CALL_OPEN) - len(calls))
+        return raw, calls, None, {}
 
     def step(self, calls, is_valid=None):
         user, reward, terminated, truncated, info = self.cora.step(calls)
         statuses = [c["status"] for c in info["calls"]]
         executed, refused, invalid = (statuses.count(s) for s in ("executed", "refused", "invalid"))
-        all_ok = bool(statuses) and executed == len(statuses)
+        dropped, self._dropped = self._dropped, 0
+        malformed = bool(info["malformed"] or dropped)
+        empty = not statuses and not dropped
+        all_ok = bool(statuses) and executed == len(statuses) and not dropped
         shaping = 0.0
         if all_ok and self.format_bonus:
             shaping = self.format_bonus
         elif not all_ok:
-            if (not statuses or invalid or info["malformed"]) and self.format_penalty:
+            if empty:
+                shaping -= self.empty_penalty
+            elif invalid or malformed:
                 shaping -= self.format_penalty
             if refused and self.semantic_penalty:
                 shaping -= self.semantic_penalty * refused
@@ -81,12 +98,14 @@ class CoraVerlogEnv(gym.Env):
         ep["score_return"] += float(reward)
         ep["calls"] += len(statuses)
         ep["executed"] += executed; ep["refused"] += refused; ep["invalid"] += invalid
-        ep["malformed_turns"] += int(info["malformed"])
+        ep["malformed_turns"] += int(malformed)
+        ep["dropped"] += dropped; ep["empty_turns"] += int(empty)
         for c in info["calls"]:
             if c["status"] == "executed" and c["tool"] in ACTION_TYPES:
                 ep[f"n_{c['tool']}"] += 1
         turn = {"calls": len(statuses), "executed": executed, "refused": refused, "invalid": invalid,
-                "malformed": info["malformed"], "all_ok": all_ok, "shaping": shaping}
+                "malformed": malformed, "dropped": dropped, "empty": empty, "all_ok": all_ok,
+                "shaping": shaping}
         info["metrics"] = self._metrics(info, turn, terminal=bool(terminated or truncated))
         info.pop("call_results", None)          # objects; info["calls"] holds their dicts
         return self._obs(user), float(reward) + shaping, terminated, truncated, info
@@ -112,7 +131,8 @@ class CoraVerlogEnv(gym.Env):
             "behavior/calls_refused": float(turn.get("refused", 0)),
             "behavior/calls_invalid": float(turn.get("invalid", 0)),
             "behavior/malformed_turn": float(bool(turn.get("malformed"))),
-            "behavior/empty_turn": float(turn.get("calls", 1) == 0),
+            "behavior/empty_turn": float(bool(turn.get("empty"))),
+            "behavior/calls_dropped": float(turn.get("dropped", 0)),
             "behavior/all_calls_executed": float(bool(turn.get("all_ok"))),
             "behavior/shaping": float(turn.get("shaping", 0.0)),
             "episode/done": done,
@@ -123,6 +143,8 @@ class CoraVerlogEnv(gym.Env):
             "episode/calls_refused": float(ep.get("refused", 0)) * done,
             "episode/calls_invalid": float(ep.get("invalid", 0)) * done,
             "episode/malformed_turns": float(ep.get("malformed_turns", 0)) * done,
+            "episode/empty_turns": float(ep.get("empty_turns", 0)) * done,
+            "episode/calls_dropped": float(ep.get("dropped", 0)) * done,
         })
         for t in ACTION_TYPES:
             m[f"episode/executed/{t}"] = float(ep.get(f"n_{t}", 0)) * done
