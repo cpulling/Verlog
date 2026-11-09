@@ -215,6 +215,17 @@ trainer:
   # run 72590: explained variance down to -8.9, mean value 6.1 in a ~1.1-point game). Off by default.
   critic_warmup_reuse_rollout: false
 
+  # Offline critic dataset (generate_critic_dataset.py), "" = none. The critic trains on it for
+  # critic_pretrain_chunks chunks of one batch's size before step 1, then every critic update during
+  # PPO holds critic_replay_frac replay rows (the actor never sees them).
+  critic_dataset: ""
+
+  # Critic-only chunks before the first step (about 16 minutes each on 2 A6000s)
+  critic_pretrain_chunks: 0
+
+  # Share of each critic update that is replay rows
+  critic_replay_frac: 0.25
+
   # Default path to distributed filesystem for saving checkpoints
   default_hdfs_dir: null
 

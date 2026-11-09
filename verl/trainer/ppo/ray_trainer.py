@@ -936,6 +936,57 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _with_critic_values(self, batch):
+        """batch with the current critic's values: the centre of the update's value clipping."""
+        batch = batch.union(self.critic_wg.compute_values(batch))
+        batch.meta_info["global_token_num"] = batch.batch["attention_mask"].sum(-1).tolist()
+        return batch
+
+    def _critic_pretrain_eval(self, tag):
+        from verl.utils.critic_replay import explained_variance
+
+        scores = {}
+        for group, held in self.critic_dataset.holdout_batches().items():
+            values = self.critic_wg.compute_values(held).batch["values"][:, 0]
+            scores[group] = round(explained_variance(values, held.batch["returns"][:, 0]), 3)
+        print(f"[critic_pretrain] {tag}: held-out explained variance {scores}", flush=True)
+
+    def _critic_pretrain(self):
+        """Critic-only updates on the offline dataset, chunks of one PPO batch's size."""
+        chunks = int(self.config.trainer.get("critic_pretrain_chunks", 0) or 0)
+        size = int(self.config.data.train_batch_size) + int(self.config.envs.num_envs)
+        self._critic_pretrain_eval("before")
+        for i in range(1, chunks + 1):
+            batch = self._with_critic_values(self.critic_dataset.sample(size))
+            output = reduce_metrics(self.critic_wg.update_critic(batch).meta_info["metrics"])
+            print(f"[critic_pretrain] chunk {i}/{chunks}: vf_loss {output['critic/vf_loss']:.5f} "
+                  f"grad_norm {output['critic/grad_norm']:.2f}", flush=True)
+            if i % 3 == 0 or i == chunks:
+                self._critic_pretrain_eval(f"chunk {i}")
+
+    def _mix_critic_replay(self, batch):
+        """The on-policy critic batch with critic_replay_frac replay rows, shuffled. batch itself is
+        left alone: the actor and the advantages see on-policy rows only."""
+        from verl.utils.critic_replay import KEYS, explained_variance
+
+        rows = batch.batch["response_mask"].sum(-1) > 1
+        metrics = {"critic/onpolicy_explained_var": explained_variance(
+            batch.batch["values"][rows, 0], batch.batch["returns"][rows, 0])}
+        frac = float(self.config.trainer.get("critic_replay_frac", 0.0))
+        mixed = batch.select(batch_keys=KEYS + ["values"], non_tensor_batch_keys=[])
+        mixed.meta_info = {}
+        n = int(round(len(batch) * frac / (1 - frac)))
+        n += (len(batch) + n) % 2
+        if n > 0:
+            replay = self._with_critic_values(self.critic_dataset.sample(n))
+            for key in mixed.batch.keys():
+                replay.batch[key] = replay.batch[key].to(mixed.batch[key].dtype)
+            mixed = DataProto.concat([mixed, replay.select(batch_keys=KEYS + ["values"], non_tensor_batch_keys=[])])
+        metrics["critic/replay_rows"] = n
+        mixed = mixed.select_idxs(torch.randperm(len(mixed)))
+        mixed.meta_info = {"global_token_num": mixed.batch["attention_mask"].sum(-1).tolist()}
+        return mixed, metrics
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1103,6 +1154,21 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+
+        # Offline critic dataset (generate_critic_dataset.py): critic-only training before the first
+        # step, and a share of every critic update during PPO.
+        self.critic_dataset = None
+        if self.use_critic and self.config.trainer.get("critic_dataset", None):
+            from verl.utils.critic_replay import CriticDataset
+
+            self.critic_dataset = CriticDataset(
+                self.config.trainer.critic_dataset,
+                self.tokenizer.pad_token_id,
+                self.config.actor_rollout_ref.rollout.prompt_length,
+                self.config.actor_rollout_ref.rollout.response_length,
+            )
+            if self.global_steps == 0:
+                self._critic_pretrain()
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -1339,8 +1405,12 @@ class RayPPOTrainer:
 
                     # update critic
                     if self.use_critic:
+                        critic_batch = batch4train
+                        if self.critic_dataset is not None:
+                            critic_batch, replay_metrics = self._mix_critic_replay(batch4train)
+                            metrics.update(replay_metrics)
                         with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch4train)
+                            critic_output = self.critic_wg.update_critic(critic_batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
